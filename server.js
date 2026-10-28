@@ -64,9 +64,12 @@ const GIFTS = [
 ];
 const GIFT = Object.fromEntries(GIFTS.map((g) => [g.id, g]));
 const UP_EDGE = 0.95, SELL_RATE = 0.9, MAX_INV = 100;
+const giftName = (id) => (id && GIFT[id] ? `${GIFT[id].e} ${GIFT[id].n}` : null);
 
 db.exec(`CREATE TABLE IF NOT EXISTS admin_log(
   id INTEGER PRIMARY KEY AUTOINCREMENT, admin_id INTEGER NOT NULL, action TEXT NOT NULL, target INTEGER, detail TEXT, ts INTEGER NOT NULL);`);
+
+try { db.exec('ALTER TABLE withdrawals ADD COLUMN gift TEXT'); } catch {} // gift withdrawals reuse the withdrawals table
 
 const tx = (fn) => {
   db.exec('BEGIN IMMEDIATE');
@@ -258,7 +261,7 @@ const routes = {
     const x = getUser(u.tg_id);
     const c = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) bet, COALESCE(SUM(payout),0) won, COALESCE(MAX(CASE WHEN status='win' THEN mult END),0) best FROM rounds WHERE tg_id=? AND amount>0 AND status!='flying'`).get(u.tg_id);
     const m = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) bet, COALESCE(SUM(payout),0) won, COALESCE(MAX(CASE WHEN status='win' THEN mult END),0) best FROM mines WHERE tg_id=? AND status!='active'`).get(u.tg_id);
-    const w = db.prepare('SELECT id, amount, status, created_at FROM withdrawals WHERE tg_id=? ORDER BY id DESC LIMIT 10').all(u.tg_id).map((r) => ({ ...r }));
+    const w = db.prepare('SELECT id, amount, status, created_at, gift FROM withdrawals WHERE tg_id=? ORDER BY id DESC LIMIT 10').all(u.tg_id).map((r) => ({ ...r, gift_name: giftName(r.gift) }));
     return { id: x.tg_id, name: x.first_name, username: x.username, since: x.created_at, balance: x.balance, crash: { ...c }, mines: { ...m }, withdrawals: w, admin: ADMIN_IDS.has(x.tg_id) };
   },
   '/api/withdraw': (u, b) => { // request only: funds are held until the request is reviewed
@@ -267,7 +270,7 @@ const routes = {
     return tx(() => {
       const x = getUser(u.tg_id);
       if (x.balance < amount) throw new Error('no_balance');
-      if (db.prepare(`SELECT 1 FROM withdrawals WHERE tg_id=? AND status='pending'`).get(x.tg_id)) throw new Error('wd_pending');
+      if (db.prepare(`SELECT 1 FROM withdrawals WHERE tg_id=? AND status='pending' AND gift IS NULL`).get(x.tg_id)) throw new Error('wd_pending');
       db.prepare('UPDATE users SET balance=balance-? WHERE tg_id=?').run(amount, x.tg_id);
       const id = db.prepare('INSERT INTO withdrawals(tg_id,amount,created_at,updated_at) VALUES(?,?,?,?)').run(x.tg_id, amount, Date.now(), Date.now()).lastInsertRowid;
       led(x.tg_id, -amount, 'withdraw_hold', id);
@@ -277,8 +280,8 @@ const routes = {
   },
   '/api/admin/list': (u, b, t) => {
     assertAdmin(u, t, 'list');
-    return db.prepare(`SELECT w.id, w.amount, w.tg_id, x.first_name, x.username, x.balance FROM withdrawals w JOIN users x ON x.tg_id=w.tg_id WHERE w.status='pending' ORDER BY w.id LIMIT 50`)
-      .all().map((r) => ({ ...r, ...stats(r.tg_id) }));
+    return db.prepare(`SELECT w.id, w.amount, w.gift, w.tg_id, x.first_name, x.username, x.balance FROM withdrawals w JOIN users x ON x.tg_id=w.tg_id WHERE w.status='pending' ORDER BY w.id LIMIT 50`)
+      .all().map((r) => ({ ...r, gift_name: giftName(r.gift), ...stats(r.tg_id) }));
   },
   '/api/admin/set': (u, b, t) => {
     assertAdmin(u, t, 'set');
@@ -292,10 +295,10 @@ const routes = {
     const x = getUser(b.id); if (!x) throw new Error('no_game');
     return { id: x.tg_id, name: x.first_name, username: x.username, balance: x.balance, ...stats(x.tg_id) };
   },
-  '/api/admin/balance': (u, b, t) => { // change a player's balance (+ adds, - removes); every change is logged
+  '/api/admin/balance': (u, b, t) => { // credit/debit a player; the player gets a bot message, the admin gets a receipt
     assertAdmin(u, t, 'balance');
     if (!Number.isSafeInteger(b.id) || !Number.isSafeInteger(b.amount) || b.amount === 0 || Math.abs(b.amount) > 1e9) throw new Error('bad_amount');
-    return tx(() => {
+    const res = tx(() => {
       const x = getUser(b.id); if (!x) throw new Error('no_game');
       if (x.balance + b.amount < 0) throw new Error('bad_amount');
       db.prepare('UPDATE users SET balance=balance+? WHERE tg_id=?').run(b.amount, x.tg_id);
@@ -303,6 +306,15 @@ const routes = {
       audit(u.tg_id, 'balance', x.tg_id, `${b.amount > 0 ? '+' : ''}${b.amount} (was ${x.balance})`);
       return { balance: getUser(x.tg_id).balance };
     });
+    const plus = b.amount > 0;
+    sendSafe(b.id, plus ? `💰 Вам начислено ${num(b.amount)} ◆\\nБаланс: ${num(res.balance)} ◆` : `➖ С вашего счёта списано ${num(-b.amount)} ◆\\nБаланс: ${num(res.balance)} ◆`);
+    sendSafe(u.tg_id, `✅ ${plus ? 'Начислено' : 'Списано'} ${num(Math.abs(b.amount))} ◆ · 🆔 ${b.id}\\nБаланс игрока: ${num(res.balance)} ◆\\n🕒 ${fmtDate(Date.now())}`);
+    return res;
+  },
+  '/api/history': (u) => { // balance operations visible to the player (no individual bets)
+    const L = { signup: 'Стартовый баланс', admin_adjust: 'Начисление/списание админом', withdraw_hold: 'Заявка на вывод', withdraw_refund: 'Возврат по заявке', gift_buy: 'Покупка подарка', gift_sell: 'Продажа подарка' };
+    return db.prepare(`SELECT delta, reason, ts FROM ledger WHERE tg_id=? AND reason IN ('signup','admin_adjust','withdraw_hold','withdraw_refund','gift_buy','gift_sell') ORDER BY id DESC LIMIT 20`)
+      .all(u.tg_id).map((r) => ({ delta: r.delta, label: L[r.reason], ts: r.ts }));
   },
   '/api/gifts': (u) => ({
     catalog: GIFTS, balance: getUser(u.tg_id).balance,
@@ -329,6 +341,18 @@ const routes = {
     led(u.tg_id, pay, 'gift_sell', it.id);
     return { balance: getUser(u.tg_id).balance, payout: pay };
   }),
+  '/api/gifts/withdraw': (u, b) => { // request to take a gift out; the item is held until the admin decides
+    if (!Number.isInteger(b.item)) throw new Error('no_game');
+    return tx(() => {
+      const it = db.prepare('SELECT * FROM inventory WHERE id=? AND tg_id=?').get(b.item, u.tg_id);
+      if (!it) throw new Error('no_game');
+      const g = GIFT[it.gift], x = getUser(u.tg_id);
+      db.prepare('DELETE FROM inventory WHERE id=?').run(it.id);
+      const id = db.prepare('INSERT INTO withdrawals(tg_id,amount,gift,created_at,updated_at) VALUES(?,?,?,?,?)').run(x.tg_id, g.p, g.id, Date.now(), Date.now()).lastInsertRowid;
+      try { notifyGiftWithdraw(id, x, g); } catch (e) { console.error('notify:', e.message); }
+      return { id };
+    });
+  },
   '/api/upgrade': (u, b) => { // chance = price(mine)/price(target) * 0.95; roll is provably fair
     const tg = GIFT[b.target];
     if (!tg || !Number.isInteger(b.item)) throw new Error('bad_game');
@@ -393,16 +417,29 @@ function notifyWithdraw(wid, x, amount, before) { // the bot sends the admin the
   for (const id of ADMIN_IDS) sendSafe(id, text, { reply_markup: kb });
   sendSafe(x.tg_id, `✅ Заявка #${wid} на ${num(amount)} ◆ принята.\nВывод делается в течение 8 часов.`);
 }
+function notifyGiftWithdraw(wid, x, g) {
+  const s = stats(x.tg_id);
+  const text = `🎁 Заявка на вывод подарка #${wid}\n\n🆔 ${x.tg_id}${x.username ? ` (@${x.username})` : ''}${x.first_name ? ` · ${x.first_name}` : ''}\n`
+    + `🎮 Сыграно игр: ${s.games} (ставок на ${num(s.wagered)} ◆)\n🎁 Подарок: ${g.e} ${g.n} (${num(g.p)} ◆)\n`
+    + `💼 Сумма на счету: ${num(getUser(x.tg_id).balance)} ◆\n🕒 ${fmtDate(Date.now())}\n\nВывод делается в течение 8 часов.`;
+  const kb = { inline_keyboard: [[{ text: '✅ Выплачено', callback_data: `wd:paid:${wid}` }, { text: '❌ Отклонить', callback_data: `wd:rej:${wid}` }]] };
+  for (const id of ADMIN_IDS) sendSafe(id, text, { reply_markup: kb });
+  sendSafe(x.tg_id, `✅ Заявка #${wid} на вывод ${g.e} ${g.n} принята.\nВывод делается в течение 8 часов.`);
+}
 function reviewWithdrawal(id, status, adminId) {
   const w = tx(() => {
     const r = db.prepare(`SELECT * FROM withdrawals WHERE id=? AND status='pending'`).get(id);
     if (!r) throw new Error('no_game');
     db.prepare('UPDATE withdrawals SET status=?, updated_at=? WHERE id=?').run(status, Date.now(), r.id);
-    if (status === 'rejected') { db.prepare('UPDATE users SET balance=balance+? WHERE tg_id=?').run(r.amount, r.tg_id); led(r.tg_id, r.amount, 'withdraw_refund', r.id); }
+    if (status === 'rejected') {
+      if (r.gift) db.prepare('INSERT INTO inventory(tg_id,gift,created_at) VALUES(?,?,?)').run(r.tg_id, r.gift, Date.now()); // the gift goes back to the inventory
+      else { db.prepare('UPDATE users SET balance=balance+? WHERE tg_id=?').run(r.amount, r.tg_id); led(r.tg_id, r.amount, 'withdraw_refund', r.id); }
+    }
     audit(adminId, `withdraw_${status}`, r.tg_id, `#${r.id} ${r.amount}`);
     return r;
   });
-  sendSafe(w.tg_id, status === 'paid' ? `💸 Заявка #${w.id} на ${num(w.amount)} ◆ выплачена.` : `❌ Заявка #${w.id} отклонена, ${num(w.amount)} ◆ возвращены на счёт.`);
+  if (w.gift) sendSafe(w.tg_id, status === 'paid' ? `🎁 Заявка #${w.id}: ${giftName(w.gift)} выведен.` : `❌ Заявка #${w.id} отклонена, ${giftName(w.gift)} вернулся в инвентарь.`);
+  else sendSafe(w.tg_id, status === 'paid' ? `💸 Заявка #${w.id} на ${num(w.amount)} ◆ выплачена.` : `❌ Заявка #${w.id} отклонена, ${num(w.amount)} ◆ возвращены на счёт.`);
 }
 async function handleUpdate(up) { // buttons under the admin's message
   const cb = up.callback_query; if (!cb) return;

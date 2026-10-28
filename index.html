@@ -92,7 +92,7 @@ input:disabled{opacity:.45}
 <body>
 <div class="app">
   <div class="top">
-    <h1>NEON ARCADE <small style="font-size:11px;color:var(--dim);text-shadow:none">v6</small></h1>
+    <h1>NEON ARCADE <small style="font-size:11px;color:var(--dim);text-shadow:none">v8</small></h1>
     <div style="display:flex;align-items:center"><div class="bal"><span id="bal">1000</span> ◆</div><button class="mute on" id="mus" aria-label="Музыка">🎵</button><button class="mute" id="mute" aria-label="Звук">🔊</button></div>
   </div>
   <nav class="tabs"><button id="tab-crash" class="on">🚀 Crash</button><button id="tab-mines">💎 Mines</button><button id="tab-up">🎁 Апгрейд</button><button id="tab-top">🏆 Топ</button><button id="tab-profile">👤 Профиль</button></nav>
@@ -133,7 +133,7 @@ input:disabled{opacity:.45}
   <section id="t-up" hidden>
     <div class="panel">
       <div class="lbl">Твой подарок (выбери)</div><div class="gl" id="inv"></div>
-      <button class="mc" id="sell" hidden style="width:100%;margin-top:8px"></button>
+      <button class="mc" id="wdgift" hidden style="width:100%;margin-top:8px"></button>
     </div>
     <div class="panel"><div class="lbl">Цель (дороже твоего подарка)</div><div class="gl" id="tgt"></div></div>
     <div class="panel" style="text-align:center">
@@ -149,7 +149,7 @@ input:disabled{opacity:.45}
       <div class="mmsg" id="upmsg"></div>
       <button class="go" id="upgo" disabled>Выбери подарок и цель</button>
     </div>
-    <div class="panel"><div class="lbl">Магазин подарков (продажа обратно за 90%)</div><div class="gl wrap" id="shop"></div></div>
+    <div class="panel"><div class="lbl">Магазин подарков</div><div class="gl wrap" id="shop"></div></div>
   </section>
 
   <section id="t-profile" hidden>
@@ -163,6 +163,7 @@ input:disabled{opacity:.45}
       <div class="lbl" style="text-align:center">Вывод делается в течение 8 часов.</div>
       <div class="lbl">Мои заявки</div><div id="wdlist"></div>
     </div>
+    <div class="panel"><div class="lbl">Операции по счёту</div><div id="ophist"></div></div>
     <div class="panel" id="padmin" hidden>
       <div class="lbl">Админ: заявки на рассмотрении</div><div id="adlist"></div>
       <div class="lbl" style="margin-top:14px">Изменить счёт игрока</div>
@@ -556,11 +557,11 @@ input:disabled{opacity:.45}
       if(!r.withdrawals.length){var e=document.createElement('div');e.className='lbl';e.textContent='Заявок пока нет';l.appendChild(e)}
       r.withdrawals.forEach(function(w){
         var d=document.createElement('div');d.className='kv';
-        var a=document.createElement('span');a.textContent='#'+w.id+' · '+money(w.amount)+' ◆ · '+fdate(w.created_at);
+        var a=document.createElement('span');a.textContent='#'+w.id+' · '+(w.gift_name?w.gift_name+' · ':'')+money(w.amount)+' ◆ · '+fdate(w.created_at);
         var b=document.createElement('span');b.className='st '+w.status;b.textContent=WS[w.status]||w.status;
         d.appendChild(a);d.appendChild(b);l.appendChild(d);
       });
-      $('padmin').hidden=!r.admin;if(r.admin)loadAdmin();
+      loadOps();$('padmin').hidden=!r.admin;if(r.admin)loadAdmin();
     }).catch(function(e){$('wdmsg').textContent=errText(e)});
   }
   $('wdgo').onclick=function(){if(tg&&tg.requestWriteAccess){try{tg.requestWriteAccess()}catch(e){}}
@@ -570,13 +571,25 @@ input:disabled{opacity:.45}
       st.bal=r.balance;bal();$('wd').value='';m.textContent='Заявка отправлена';m.className='mmsg w';loadProfile();
     }).catch(function(e){m.textContent=errText(e);m.className='mmsg l'});
   };
+  function loadOps(){
+    api('/api/history').then(function(rows){
+      var l=$('ophist');l.innerHTML='';
+      if(!rows.length){var e=document.createElement('div');e.className='lbl';e.textContent='Операций пока нет';l.appendChild(e);return}
+      rows.forEach(function(x){
+        var d=document.createElement('div');d.className='kv';
+        var a=document.createElement('span');a.textContent=x.label+' · '+fdate(x.ts);
+        var b=document.createElement('b');b.textContent=(x.delta>0?'+':'−')+money(Math.abs(x.delta))+' ◆';b.style.color=x.delta>0?'var(--lime)':'var(--pink)';
+        d.appendChild(a);d.appendChild(b);l.appendChild(d);
+      });
+    }).catch(function(){});
+  }
   function loadAdmin(){
     api('/api/admin/list').then(function(rows){
       var l=$('adlist');l.innerHTML='';
       if(!rows.length){l.textContent='Нет ожидающих заявок';return}
       rows.forEach(function(w){
         var d=document.createElement('div');d.className='kv';d.style.flexWrap='wrap';d.style.gap='6px';
-        var a=document.createElement('span');a.textContent='#'+w.id+' '+(w.first_name||'')+(w.username?' @'+w.username:'')+' · ID '+w.tg_id+' · запросил '+money(w.amount)+' ◆ · на счету '+money(w.balance)+' ◆ · игр '+w.games+' (ставок на '+money(w.wagered)+' ◆)';
+        var a=document.createElement('span');a.textContent='#'+w.id+' '+(w.first_name||'')+(w.username?' @'+w.username:'')+' · ID '+w.tg_id+' · '+(w.gift_name?'подарок '+w.gift_name+', цена ':'запросил ')+money(w.amount)+' ◆ · на счету '+money(w.balance)+' ◆ · игр '+w.games+' (ставок на '+money(w.wagered)+' ◆)';
         d.appendChild(a);
         [['paid','Выплачено'],['rejected','Отклонить']].forEach(function(x){
           var b=document.createElement('button');b.className='mc';b.style.flex='none';b.textContent=x[1];
@@ -619,7 +632,7 @@ input:disabled{opacity:.45}
     var inv=$('inv');inv.innerHTML='';
     if(!UP.items.length){var e=document.createElement('div');e.className='lbl';e.textContent='Подарков нет: купи в магазине ниже';inv.appendChild(e)}
     UP.items.forEach(function(it){var g=gift(it);inv.appendChild(gcard(g,money(g.p)+' ◆',UP.sel===it.id,function(){sfx.tap();UP.sel=it.id;UP.tgt=null;upRender()}))});
-    var f=selGift(),sb=$('sell');sb.hidden=!f;if(f)sb.textContent='Продать '+f.e+' за '+money(Math.floor(f.p*.9))+' ◆';
+    var f=selGift(),sb=$('wdgift');sb.hidden=!f;if(f)sb.textContent='Вывести '+f.e+' '+f.n;
     var tg=$('tgt');tg.innerHTML='';
     if(!f){var e2=document.createElement('div');e2.className='lbl';e2.textContent='Сначала выбери свой подарок';tg.appendChild(e2)}
     else{
@@ -650,9 +663,14 @@ input:disabled{opacity:.45}
     if(UP.busy)return;
     api('/api/gifts/buy',{gift:id}).then(function(r){st.bal=r.balance;bal();sfx.cash();buzz();upMsg('Куплено: '+UP.map[id].e+' '+UP.map[id].n,'w');loadUp()}).catch(function(e){upMsg(errText(e),'l')});
   }
-  $('sell').onclick=function(){
-    if(UP.busy||!UP.sel)return;
-    api('/api/gifts/sell',{item:UP.sel}).then(function(r){st.bal=r.balance;bal();UP.sel=null;UP.tgt=null;sfx.tap();upMsg('Продано за '+money(r.payout)+' ◆','w');loadUp()}).catch(function(e){upMsg(errText(e),'l')});
+  var wdArm=0;
+  $('wdgift').onclick=function(){
+    if(UP.busy||!UP.sel)return;var b=$('wdgift');
+    if(!wdArm){wdArm=1;b.textContent='Нажми ещё раз: подтвердить вывод';setTimeout(function(){wdArm=0;upRender()},3500);return}
+    wdArm=0;
+    api('/api/gifts/withdraw',{item:UP.sel}).then(function(r){
+      UP.sel=null;UP.tgt=null;sfx.cash();buzz('good');upMsg('Заявка #'+r.id+' отправлена. Вывод делается в течение 8 часов.','w');loadUp();
+    }).catch(function(e){upMsg(errText(e),'l')});
   };
   function spinTicks(){for(var i=0;i<26;i++){(function(i){setTimeout(function(){tone(360+Math.random()*60,.04,'square',.05)},4200*(1-Math.pow(1-i/26,2.3)))})(i)}}
   $('upgo').onclick=function(){
