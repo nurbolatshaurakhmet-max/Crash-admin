@@ -42,6 +42,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_mines ON mines(tg_id) WHERE status='active
 db.exec(`CREATE TABLE IF NOT EXISTS withdrawals(
   id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER NOT NULL REFERENCES users(tg_id),
   amount INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);`);
+db.exec(`CREATE TABLE IF NOT EXISTS deposit_requests(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER NOT NULL REFERENCES users(tg_id),
+  amount INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);`);
 const SIZES = [3, 5, 7, 10], MINES = [3, 4, 5, 8], EDGE = 0.97, MIN_WD = 100;
 // ADMIN_ID: your Telegram ID (several: comma separated). Admin = Telegram-signed identity + ID whitelist + fresh session.
 const ADMIN_IDS = new Set((process.env.ADMIN_ID || '').split(',').map((x) => Number(x.trim())).filter((n) => Number.isSafeInteger(n) && n > 0));
@@ -264,6 +267,17 @@ const routes = {
     const w = db.prepare('SELECT id, amount, status, created_at, gift FROM withdrawals WHERE tg_id=? ORDER BY id DESC LIMIT 10').all(u.tg_id).map((r) => ({ ...r, gift_name: giftName(r.gift) }));
     return { id: x.tg_id, name: x.first_name, username: x.username, since: x.created_at, balance: x.balance, crash: { ...c }, mines: { ...m }, withdrawals: w, admin: ADMIN_IDS.has(x.tg_id) };
   },
+  '/api/deposit': (u, b) => {
+    const amount = b.amount;
+    if (!Number.isSafeInteger(amount) || amount < 1 || amount > 1000000000) throw new Error('bad_amount');
+    return tx(() => {
+      const x = getUser(u.tg_id);
+      if (db.prepare(`SELECT 1 FROM deposit_requests WHERE tg_id=? AND status='pending'`).get(x.tg_id)) throw new Error('dep_pending');
+      const id = db.prepare('INSERT INTO deposit_requests(tg_id,amount,created_at,updated_at) VALUES(?,?,?,?)').run(x.tg_id, amount, Date.now(), Date.now()).lastInsertRowid;
+      try { notifyDeposit(id, x, amount); } catch (e) { console.error('deposit notify:', e.message); }
+      return { id };
+    });
+  },
   '/api/withdraw': (u, b) => { // request only: funds are held until the request is reviewed
     const amount = b.amount;
     if (!Number.isSafeInteger(amount) || amount < MIN_WD) throw new Error('bad_amount');
@@ -380,7 +394,7 @@ const routes = {
     return { revealed: old, fair: fair(getUser(x.tg_id)) };
   },
 };
-const KNOWN = new Set(['bad_amount', 'bad_auto', 'bad_game', 'bad_cell', 'no_game', 'forbidden', 'wd_pending', 'inv_full', 'no_balance', 'round_active', 'bad_json', 'big']);
+const KNOWN = new Set(['dep_pending', 'bad_amount', 'bad_auto', 'bad_game', 'bad_cell', 'no_game', 'forbidden', 'wd_pending', 'inv_full', 'no_balance', 'round_active', 'bad_json', 'big']);
 
 /* ---------- admin security + Telegram bot notifications ---------- */
 const audit = (admin, action, target, detail = '') =>
@@ -417,6 +431,31 @@ function notifyWithdraw(wid, x, amount, before) { // the bot sends the admin the
   for (const id of ADMIN_IDS) sendSafe(id, text, { reply_markup: kb });
   sendSafe(x.tg_id, `✅ Заявка #${wid} на ${num(amount)} ◆ принята.\nВывод делается в течение 8 часов.`);
 }
+function notifyDeposit(did, x, amount) {
+  const s = stats(x.tg_id);
+  const text = `💰 Заявка на пополнение #${did}\\n\\n🆔 ${x.tg_id}${x.username ? ` (@${x.username})` : ''}${x.first_name ? ` · ${x.first_name}` : ''}\\n`
+    + `🎮 Сыграно игр: ${s.games} (ставок на ${num(s.wagered)} ◆)\\n💵 Запросил: ${num(amount)} ◆\\n`
+    + `💼 Сумма на счету: ${num(getUser(x.tg_id).balance)} ◆\\n🕒 ${fmtDate(Date.now())}\\n\\nПополнение будет зачислено после подтверждения.`;
+  const kb = { inline_keyboard: [[{ text: '✅ Зачислить', callback_data: `dp:paid:${did}` }, { text: '❌ Отклонить', callback_data: `dp:rej:${did}` }]] };
+  for (const id of ADMIN_IDS) sendSafe(id, text, { reply_markup: kb });
+  sendSafe(x.tg_id, `✅ Заявка #${did} на пополнение ${num(amount)} ◆ отправлена администратору.`);
+}
+function reviewDeposit(id, status, adminId) {
+  const d = tx(() => {
+    const r = db.prepare(`SELECT * FROM deposit_requests WHERE id=? AND status='pending'`).get(id);
+    if (!r) throw new Error('no_game');
+    db.prepare('UPDATE deposit_requests SET status=?, updated_at=? WHERE id=?').run(status, Date.now(), r.id);
+    if (status === 'paid') {
+      db.prepare('UPDATE users SET balance=balance+? WHERE tg_id=?').run(r.amount, r.tg_id);
+      led(r.tg_id, r.amount, 'admin_adjust', null);
+    }
+    audit(adminId, `deposit_${status}`, r.tg_id, `#${r.id} ${r.amount}`);
+    return r;
+  });
+  sendSafe(d.tg_id, status === 'paid'
+    ? `💰 Заявка #${d.id} подтверждена. Зачислено ${num(d.amount)} ◆. Баланс: ${num(getUser(d.tg_id).balance)} ◆`
+    : `❌ Заявка #${d.id} на пополнение ${num(d.amount)} ◆ отклонена.`);
+}
 function notifyGiftWithdraw(wid, x, g) {
   const s = stats(x.tg_id);
   const text = `🎁 Заявка на вывод подарка #${wid}\n\n🆔 ${x.tg_id}${x.username ? ` (@${x.username})` : ''}${x.first_name ? ` · ${x.first_name}` : ''}\n`
@@ -443,13 +482,16 @@ function reviewWithdrawal(id, status, adminId) {
 }
 async function handleUpdate(up) { // buttons under the admin's message
   const cb = up.callback_query; if (!cb) return;
-  const m = /^wd:(paid|rej):(\d+)$/.exec(cb.data || ''); if (!m) return;
+  const m = /^(wd|dp):(paid|rej):(\\d+)$/.exec(cb.data || ''); if (!m) return;
   const answer = (text) => tgCall('answerCallbackQuery', { callback_query_id: cb.id, text, show_alert: true }).catch(() => {});
   if (!ADMIN_IDS.has(cb.from.id)) { audit(cb.from.id, 'denied', null, 'bot button'); return answer('Нет доступа'); }
-  const status = m[1] === 'paid' ? 'paid' : 'rejected';
-  try { reviewWithdrawal(Number(m[2]), status, cb.from.id); } catch { return answer('Заявка уже обработана'); }
-  await answer(status === 'paid' ? 'Отмечено: выплачено' : 'Отклонено, деньги возвращены игроку');
-  if (cb.message) await tgCall('editMessageText', { chat_id: cb.message.chat.id, message_id: cb.message.message_id, text: `${cb.message.text}\n\n${status === 'paid' ? '✅ ВЫПЛАЧЕНО' : '❌ ОТКЛОНЕНО'} · ${fmtDate(Date.now())}` }).catch(() => {});
+  const status = m[2] === 'paid' ? 'paid' : 'rejected';
+  try {
+    if (m[1] === 'wd') reviewWithdrawal(Number(m[3]), status, cb.from.id);
+    else reviewDeposit(Number(m[3]), status, cb.from.id);
+  } catch { return answer('Заявка уже обработана'); }
+  await answer(m[1] === 'dp' ? (status === 'paid' ? 'Пополнение зачислено' : 'Заявка отклонена') : (status === 'paid' ? 'Отмечено: выплачено' : 'Отклонено, деньги возвращены игроку'));
+  if (cb.message) await tgCall('editMessageText', { chat_id: cb.message.chat.id, message_id: cb.message.message_id, text: `${cb.message.text}\\n\\n${status === 'paid' ? '✅ ВЫПОЛНЕНО' : '❌ ОТКЛОНЕНО'} · ${fmtDate(Date.now())}` }).catch(() => {});
 }
 async function pollBot() {
   await tgCall('deleteWebhook', {}).catch(() => {});

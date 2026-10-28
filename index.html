@@ -156,6 +156,12 @@ input:disabled{opacity:.45}
     <div class="panel"><div class="lbl">Профиль</div><div id="pinfo"></div></div>
     <div class="panel"><div class="lbl">Статистика</div><div id="pstats"></div></div>
     <div class="panel">
+      <div class="lbl">Пополнение баланса</div>
+      <input id="depamt" type="number" inputmode="numeric" min="1" placeholder="Сумма пополнения" style="margin-bottom:8px">
+      <button class="go" id="depgo">💰 Подать заявку на пополнение</button>
+      <div class="mmsg" id="depmsg"></div>
+    </div>
+    <div class="panel">
       <div class="lbl">Вывод средств (минимум 100 ◆)</div>
       <input id="wd" type="number" inputmode="numeric" min="100" placeholder="Сумма" style="margin-bottom:8px">
       <button class="go" id="wdgo">Подать заявку на вывод</button>
@@ -340,7 +346,7 @@ input:disabled{opacity:.45}
   }
   function errText(e){
     var m=e&&e.message;
-    return m==='unauthorized'?((tg&&tg.initData)?'Ошибка входа: проверь BOT_TOKEN на сервере':'Открой игру через Telegram'):m==='no_balance'?'Не хватает баланса':m==='round_active'?'Раунд ещё идёт':m==='slow_down'?'Слишком часто':m==='wd_pending'?'Предыдущая заявка ещё на рассмотрении':m==='bad_amount'?'Неверная сумма':m==='forbidden'?'Нет доступа (админ-сессия старше часа: закрой и открой приложение)':m==='no_game'?'Не найдено':m==='inv_full'?'Инвентарь полон':'Ошибка связи ('+(m||'?')+')';
+    return m==='unauthorized'?((tg&&tg.initData)?'Ошибка входа: проверь BOT_TOKEN на сервере':'Открой игру через Telegram'):m==='no_balance'?'Не хватает баланса':m==='round_active'?'Раунд ещё идёт':m==='slow_down'?'Слишком часто':m==='wd_pending'?'Предыдущая заявка ещё на рассмотрении':m==='dep_pending'?'Заявка на пополнение уже на рассмотрении':m==='bad_amount'?'Неверная сумма':m==='forbidden'?'Нет доступа (админ-сессия старше часа: закрой и открой приложение)':m==='no_game'?'Не найдено':m==='inv_full'?'Инвентарь полон':'Ошибка связи ('+(m||'?')+')';
   }
   function showFair(f){if(f){var t='Provably fair · hash '+f.hash.slice(0,16)+'… · nonce '+f.nonce;$('fair').textContent=t;$('fair2').textContent=t}}
   var busy=false,polling=false,lastPoll=0,rtt=0;
@@ -564,6 +570,13 @@ input:disabled{opacity:.45}
       loadOps();$('padmin').hidden=!r.admin;if(r.admin)loadAdmin();
     }).catch(function(e){$('wdmsg').textContent=errText(e)});
   }
+  $('depgo').onclick=function(){
+    var a=Math.floor(+$('depamt').value),m=$('depmsg');
+    if(!(a>=1)){m.textContent='Укажи сумму пополнения';m.className='mmsg l';return}
+    api('/api/deposit',{amount:a}).then(function(r){
+      $('depamt').value='';m.textContent='Заявка на пополнение отправлена администратору';m.className='mmsg w';
+    }).catch(function(e){m.textContent=errText(e);m.className='mmsg l'});
+  };
   $('wdgo').onclick=function(){if(tg&&tg.requestWriteAccess){try{tg.requestWriteAccess()}catch(e){}}
     var a=Math.floor(+$('wd').value),m=$('wdmsg');
     if(!(a>=100)){m.textContent='Минимум 100 ◆';m.className='mmsg l';return}
