@@ -12,7 +12,8 @@ if (!BOT_TOKEN || !/^[0-9a-f]{64}$/i.test(SEED_KEY || '')) {
   process.exit(1);
 }
 const KEY = Buffer.from(SEED_KEY, 'hex');
-const G = 0.12, START = 1000, MIN_BET = 1, MAX_BET = 100000, MAX_MULT = 10000, INIT_TTL = 86400;
+const G = 0.12, START = Math.max(0, Math.floor(Number(process.env.START_BALANCE) || 0)), // no free starting balance unless START_BALANCE is set
+   MIN_BET = 1, MAX_BET = 100000, MAX_MULT = 10000, INIT_TTL = 86400;
 const INDEX = [path.join(import.meta.dirname, 'index.html'), path.join(import.meta.dirname, 'public', 'index.html')].find((f) => fs.existsSync(f));
 
 /* ---------- database ---------- */
@@ -42,10 +43,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_mines ON mines(tg_id) WHERE status='active
 db.exec(`CREATE TABLE IF NOT EXISTS withdrawals(
   id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER NOT NULL REFERENCES users(tg_id),
   amount INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);`);
-db.exec(`CREATE TABLE IF NOT EXISTS deposit_requests(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER NOT NULL REFERENCES users(tg_id),
-  amount INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);`);
-const SIZES = [3, 5, 7, 10], MINES = [3, 4, 5, 8], EDGE = 0.97, MIN_WD = 100;
+const SIZES = [3, 5, 7, 10], MINES = [3, 4, 5, 8], EDGE = 0.97, MIN_WD = 50;
 // ADMIN_ID: your Telegram ID (several: comma separated). Admin = Telegram-signed identity + ID whitelist + fresh session.
 const ADMIN_IDS = new Set((process.env.ADMIN_ID || '').split(',').map((x) => Number(x.trim())).filter((n) => Number.isSafeInteger(n) && n > 0));
 const TZ = process.env.TIMEZONE || 'Etc/GMT-5';
@@ -73,6 +71,20 @@ db.exec(`CREATE TABLE IF NOT EXISTS admin_log(
   id INTEGER PRIMARY KEY AUTOINCREMENT, admin_id INTEGER NOT NULL, action TEXT NOT NULL, target INTEGER, detail TEXT, ts INTEGER NOT NULL);`);
 
 try { db.exec('ALTER TABLE withdrawals ADD COLUMN gift TEXT'); } catch {} // gift withdrawals reuse the withdrawals table
+
+db.exec(`CREATE TABLE IF NOT EXISTS crash_rounds(
+  id INTEGER PRIMARY KEY, seed_enc TEXT NOT NULL, seed_hash TEXT NOT NULL, crash REAL NOT NULL,
+  t_bet0 INTEGER NOT NULL, t_fly0 INTEGER NOT NULL, t_end INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'open');
+CREATE TABLE IF NOT EXISTS crash_bets(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, round_id INTEGER NOT NULL, tg_id INTEGER NOT NULL REFERENCES users(tg_id),
+  amount INTEGER NOT NULL, auto REAL, status TEXT NOT NULL DEFAULT 'open', mult REAL, payout INTEGER, UNIQUE(round_id, tg_id));
+CREATE TABLE IF NOT EXISTS chicken(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER NOT NULL REFERENCES users(tg_id), amount INTEGER NOT NULL,
+  level TEXT NOT NULL, burn TEXT NOT NULL, step INTEGER NOT NULL DEFAULT 0, nonce INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active', mult REAL, payout INTEGER);
+CREATE UNIQUE INDEX IF NOT EXISTS one_chicken ON chicken(tg_id) WHERE status='active';`);
+const BET_MS = 5000, END_MS = 3000; // betting window (5 s) and pause after the crash
+const CH_LEVELS = { easy: 0.92, mid: 0.85, hard: 0.75 }, CH_STEPS = 20; // chance to survive one step
 
 const tx = (fn) => {
   db.exec('BEGIN IMMEDIATE');
@@ -127,7 +139,7 @@ function ensureUser(u) {
     tx(() => {
       db.prepare('INSERT INTO users(tg_id,username,first_name,balance,seed_enc,seed_hash,client_seed,nonce,created_at) VALUES(?,?,?,?,?,?,?,0,?)')
         .run(u.id, u.username ?? null, u.first_name ?? null, START, s.enc, s.hash, crypto.randomBytes(6).toString('hex'), Date.now());
-      led(u.id, START, 'signup', null);
+      if (START) led(u.id, START, 'signup', null);
     });
     row = getUser(u.id);
   }
@@ -183,44 +195,131 @@ const lastView = (id) => {
 };
 const fair = (u) => ({ hash: u.seed_hash, clientSeed: u.client_seed, nonce: u.nonce });
 
+/* ---------- Crash: ONE shared round for all players (commit-reveal: hash is public before, seed after) ---------- */
+const crashMs = (c) => Math.ceil((Math.log(c) / G) * 1000);
+const phaseOf = (r, now) => (now < r.t_fly0 ? 'bet' : now < r.t_end ? 'fly' : 'end');
+function newRound(t0) {
+  const seed = crypto.randomBytes(32).toString('hex');
+  const id = (db.prepare('SELECT MAX(id) m FROM crash_rounds').get().m ?? 0) + 1;
+  const crash = crashPoint(seed, 'round', id), tf = t0 + BET_MS;
+  db.prepare('INSERT INTO crash_rounds(id,seed_enc,seed_hash,crash,t_bet0,t_fly0,t_end) VALUES(?,?,?,?,?,?,?)').run(id, enc(seed), sha(seed), crash, t0, tf, tf + crashMs(crash));
+  return id;
+}
+function winBet(b, mult) {
+  const payout = Math.floor(b.amount * mult);
+  tx(() => {
+    const d = db.prepare(`UPDATE crash_bets SET status='win', mult=?, payout=? WHERE id=? AND status='open'`).run(mult, payout, b.id);
+    if (d.changes === 1) { db.prepare('UPDATE users SET balance=balance+? WHERE tg_id=?').run(payout, b.tg_id); led(b.tg_id, payout, 'crash_win', b.round_id); }
+  });
+}
+function settleRound(r) { // everyone who did not cash out: auto-cashout wins, the rest lose
+  tx(() => {
+    for (const b of db.prepare(`SELECT * FROM crash_bets WHERE round_id=? AND status='open'`).all(r.id)) {
+      if (b.auto && b.auto <= r.crash) {
+        const p = Math.floor(b.amount * b.auto);
+        db.prepare(`UPDATE crash_bets SET status='win', mult=?, payout=? WHERE id=?`).run(b.auto, p, b.id);
+        db.prepare('UPDATE users SET balance=balance+? WHERE tg_id=?').run(p, b.tg_id); led(b.tg_id, p, 'crash_win', r.id);
+      } else db.prepare(`UPDATE crash_bets SET status='loss', mult=0, payout=0 WHERE id=?`).run(b.id);
+    }
+    db.prepare(`UPDATE crash_rounds SET status='done' WHERE id=?`).run(r.id);
+  });
+}
+function currentRound(now) { // rounds advance lazily: whoever asks first moves the clock forward
+  let r = db.prepare('SELECT * FROM crash_rounds ORDER BY id DESC LIMIT 1').get();
+  if (r && r.status === 'open' && now >= r.t_end) { settleRound(r); r = { ...r, status: 'done' }; }
+  if (!r || now >= r.t_end + END_MS) r = db.prepare('SELECT * FROM crash_rounds WHERE id=?').get(newRound(now));
+  return r;
+}
+const myBet = (rid, uid) => db.prepare('SELECT * FROM crash_bets WHERE round_id=? AND tg_id=?').get(rid, uid);
+const crashAgg = (id) => {
+  const a = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) bet, COALESCE(SUM(payout),0) won, COALESCE(MAX(CASE WHEN status='win' THEN mult END),0) best FROM rounds WHERE tg_id=? AND amount>0 AND status!='flying'`).get(id);
+  const b = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) bet, COALESCE(SUM(payout),0) won, COALESCE(MAX(CASE WHEN status='win' THEN mult END),0) best FROM crash_bets WHERE tg_id=? AND status IN ('win','loss')`).get(id);
+  return { n: a.n + b.n, bet: a.bet + b.bet, won: a.won + b.won, best: Math.max(a.best, b.best) };
+};
+
+/* ---------- Chicken Run: every step may burn; the burn step is fixed (HMAC of the seeds) when the game starts ---------- */
+const chMult = (level, step) => EDGE / CH_LEVELS[level] ** step;
+function burnStep(ss, cs, nonce, p) { // first step whose roll >= p burns the chicken (0 = survives all steps)
+  for (let i = 1; i <= CH_STEPS; i++) {
+    const roll = parseInt(crypto.createHmac('sha256', ss).update(`${cs}:${nonce}:c${i}`).digest('hex').slice(0, 13), 16) / 2 ** 52;
+    if (roll >= p) return i;
+  }
+  return 0;
+}
+const activeChicken = (id) => db.prepare(`SELECT * FROM chicken WHERE tg_id=? AND status='active'`).get(id);
+function endChicken(g, res, mult) {
+  const payout = res === 'win' ? Math.floor(g.amount * mult) : 0;
+  return tx(() => {
+    const d = db.prepare(`UPDATE chicken SET status=?, mult=?, payout=? WHERE id=? AND status='active'`).run(res, mult, payout, g.id);
+    if (d.changes === 1 && payout) { db.prepare('UPDATE users SET balance=balance+? WHERE tg_id=?').run(payout, g.tg_id); led(g.tg_id, payout, 'chicken_win', g.id); }
+    return { mult, payout, balance: getUser(g.tg_id).balance };
+  });
+}
+
 const routes = {
   '/api/auth': (u) => {
-    const f = flying(u.tg_id); if (f) resolve(f, Date.now());
-    const hist = db.prepare(`SELECT crash FROM rounds WHERE tg_id=? AND status!='flying' ORDER BY id DESC LIMIT 12`).all(u.tg_id).map((x) => x.crash);
+    const hist = db.prepare(`SELECT crash FROM crash_rounds WHERE status='done' ORDER BY id DESC LIMIT 12`).all().map((x) => x.crash);
+    const cg = activeChicken(u.tg_id);
     const n = getUser(u.tg_id);
     const mg = activeMines(u.tg_id), op = mg ? JSON.parse(mg.opened) : [];
     return {
       balance: n.balance, history: hist, fair: fair(n),
       mines: mg ? { n: mg.n, k: mg.k, amount: mg.amount, opened: op, mult: minesMult(mg.n, mg.k, op.length) } : null,
+      chicken: cg ? { level: cg.level, amount: cg.amount, step: cg.step, mult: cg.step ? chMult(cg.level, cg.step) : 1 } : null,
     };
   },
-  '/api/bet': (u, b) => {
-    const amount = b.amount;
-    const auto = b.auto == null ? null : Math.floor(Number(b.auto) * 100) / 100;
-    if (!Number.isSafeInteger(amount) || amount < 0 || amount > MAX_BET) throw new Error('bad_amount'); // 0 = watch-only flight
+  '/api/crash/state': (u) => {
+    const now = Date.now(), r = currentRound(now), ph = phaseOf(r, now);
+    let b = myBet(r.id, u.tg_id);
+    if (b && b.status === 'open' && ph === 'fly' && b.auto && b.auto <= r.crash && mAt(now - r.t_fly0) >= b.auto) { winBet(b, b.auto); b = myBet(r.id, u.tg_id); }
+    const hist = db.prepare(`SELECT id, crash, seed_enc FROM crash_rounds WHERE status='done' ORDER BY id DESC LIMIT 12`).all();
+    return {
+      now, id: r.id, phase: ph, hash: r.seed_hash, t_fly0: r.t_fly0, crash: ph === 'end' ? r.crash : undefined, // the crash point is NEVER sent before the round ends
+      players: db.prepare('SELECT COUNT(*) n FROM crash_bets WHERE round_id=?').get(r.id).n,
+      bet: b ? { amount: b.amount, auto: b.auto, status: b.status, mult: b.mult, payout: b.payout } : null,
+      balance: getUser(u.tg_id).balance,
+      history: hist.map((x) => x.crash),
+      recent: hist.slice(0, 3).map((x) => ({ id: x.id, crash: x.crash, seed: dec(x.seed_enc) })), // seeds are revealed AFTER the round: sha256(seed) must equal the published hash
+    };
+  },
+  '/api/crash/bet': (u, b) => {
+    const amount = b.amount, auto = b.auto == null ? null : Math.floor(Number(b.auto) * 100) / 100;
+    if (!Number.isSafeInteger(amount) || amount < MIN_BET || amount > MAX_BET) throw new Error('bad_amount');
     if (auto !== null && !(auto >= 1.01 && auto <= MAX_MULT)) throw new Error('bad_auto');
-    const f = flying(u.tg_id); if (f && !resolve(f, Date.now())) throw new Error('round_active');
+    const now = Date.now(), r = currentRound(now);
+    if (phaseOf(r, now) !== 'bet') throw new Error('late');
     return tx(() => {
       const x = getUser(u.tg_id);
       if (x.balance < amount) throw new Error('no_balance');
-      const crash = crashPoint(dec(x.seed_enc), x.client_seed, x.nonce);
-      db.prepare('UPDATE users SET balance=balance-?, nonce=nonce+1 WHERE tg_id=?').run(amount, x.tg_id);
-      const id = db.prepare('INSERT INTO rounds(tg_id,amount,auto,crash,nonce,t0) VALUES(?,?,?,?,?,?)').run(x.tg_id, amount, auto, crash, x.nonce, Date.now()).lastInsertRowid;
-      if (amount) led(x.tg_id, -amount, 'bet', id);
-      const n = getUser(x.tg_id);
-      return { balance: n.balance, fair: fair(n) };
+      if (myBet(r.id, x.tg_id)) throw new Error('round_active');
+      db.prepare('UPDATE users SET balance=balance-? WHERE tg_id=?').run(amount, x.tg_id);
+      const id = db.prepare('INSERT INTO crash_bets(round_id,tg_id,amount,auto) VALUES(?,?,?,?)').run(r.id, x.tg_id, amount, auto).lastInsertRowid;
+      led(x.tg_id, -amount, 'crash_bet', id);
+      return { balance: getUser(x.tg_id).balance };
     });
   },
-  '/api/status': (u) => {
-    const f = flying(u.tg_id); if (!f) return lastView(u.tg_id);
-    const now = Date.now(), r = resolve(f, now);
-    return r ? view(r) : { status: 'flying' };
+  '/api/crash/cancel': (u) => {
+    const now = Date.now(), r = currentRound(now);
+    if (phaseOf(r, now) !== 'bet') throw new Error('late');
+    return tx(() => {
+      const b = myBet(r.id, u.tg_id);
+      if (!b || b.status !== 'open') throw new Error('no_game');
+      db.prepare('DELETE FROM crash_bets WHERE id=?').run(b.id);
+      db.prepare('UPDATE users SET balance=balance+? WHERE tg_id=?').run(b.amount, b.tg_id);
+      led(b.tg_id, b.amount, 'crash_cancel', b.id);
+      return { balance: getUser(u.tg_id).balance };
+    });
   },
-  '/api/cashout': (u) => {
-    const f = flying(u.tg_id); if (!f) return lastView(u.tg_id);
-    const now = Date.now(), r = resolve(f, now);
-    if (r) return view(r); // too late, or auto-cashout already fired
-    return view(settle(f, 'win', Math.max(1, Math.floor(mAt(now - f.t0) * 100) / 100))); // multiplier from SERVER clock
+  '/api/crash/cash': (u) => { // the multiplier is taken from the SERVER clock, never from the client
+    const now = Date.now(), r = currentRound(now);
+    if (phaseOf(r, now) !== 'fly') throw new Error('late');
+    const b = myBet(r.id, u.tg_id);
+    if (!b || b.status !== 'open') throw new Error('no_game');
+    const m = mAt(now - r.t_fly0);
+    if (m >= r.crash) throw new Error('late');
+    winBet(b, b.auto && b.auto <= r.crash && m >= b.auto ? b.auto : Math.max(1, Math.floor(m * 100) / 100));
+    const fin = myBet(r.id, u.tg_id);
+    return { mult: fin.mult, payout: fin.payout, balance: getUser(u.tg_id).balance };
   },
   '/api/mines/start': (u, b) => {
     const { amount, n, k } = b;
@@ -254,6 +353,35 @@ const routes = {
     const c = JSON.parse(g.opened).length; if (c < 1) throw new Error('bad_cell');
     return endMines(g, 'win', minesMult(g.n, g.k, c));
   },
+  '/api/chicken/start': (u, b) => {
+    const { amount, level } = b;
+    if (!Number.isSafeInteger(amount) || amount < MIN_BET || amount > MAX_BET) throw new Error('bad_amount');
+    if (!(level in CH_LEVELS)) throw new Error('bad_game');
+    if (activeChicken(u.tg_id)) throw new Error('round_active');
+    return tx(() => {
+      const x = getUser(u.tg_id);
+      if (x.balance < amount) throw new Error('no_balance');
+      const burn = burnStep(dec(x.seed_enc), x.client_seed, x.nonce, CH_LEVELS[level]);
+      db.prepare('UPDATE users SET balance=balance-?, nonce=nonce+1 WHERE tg_id=?').run(amount, x.tg_id);
+      const id = db.prepare('INSERT INTO chicken(tg_id,amount,level,burn,nonce) VALUES(?,?,?,?,?)').run(x.tg_id, amount, level, enc(String(burn)), x.nonce).lastInsertRowid;
+      led(x.tg_id, -amount, 'chicken_bet', id);
+      return { balance: getUser(x.tg_id).balance, fair: fair(getUser(x.tg_id)) };
+    });
+  },
+  '/api/chicken/step': (u) => {
+    const g = activeChicken(u.tg_id); if (!g) throw new Error('no_game');
+    const step = g.step + 1, burn = Number(dec(g.burn));
+    db.prepare('UPDATE chicken SET step=? WHERE id=?').run(step, g.id);
+    if (burn === step) return { result: 'burn', step, ...endChicken(g, 'loss', 0) };
+    const mult = chMult(g.level, step);
+    if (step >= CH_STEPS) return { result: 'win', step, auto: true, ...endChicken(g, 'win', mult) };
+    return { result: 'ok', step, mult, next: chMult(g.level, step + 1) };
+  },
+  '/api/chicken/cash': (u) => {
+    const g = activeChicken(u.tg_id); if (!g) throw new Error('no_game');
+    if (g.step < 1) throw new Error('bad_cell');
+    return { result: 'win', step: g.step, ...endChicken(g, 'win', chMult(g.level, g.step)) };
+  },
   '/api/top': (u) => { // only first names are exposed, never usernames or IDs
     const top = db.prepare('SELECT tg_id, first_name, balance FROM users ORDER BY balance DESC LIMIT 10').all()
       .map((r, i) => ({ rank: i + 1, name: (r.first_name || 'Игрок').slice(0, 16), balance: r.balance, me: r.tg_id === u.tg_id }));
@@ -262,21 +390,11 @@ const routes = {
   },
   '/api/profile': (u) => {
     const x = getUser(u.tg_id);
-    const c = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) bet, COALESCE(SUM(payout),0) won, COALESCE(MAX(CASE WHEN status='win' THEN mult END),0) best FROM rounds WHERE tg_id=? AND amount>0 AND status!='flying'`).get(u.tg_id);
+    const c = crashAgg(u.tg_id);
+    const ch = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) bet, COALESCE(SUM(payout),0) won, COALESCE(MAX(CASE WHEN status='win' THEN mult END),0) best FROM chicken WHERE tg_id=? AND status!='active'`).get(u.tg_id);
     const m = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) bet, COALESCE(SUM(payout),0) won, COALESCE(MAX(CASE WHEN status='win' THEN mult END),0) best FROM mines WHERE tg_id=? AND status!='active'`).get(u.tg_id);
     const w = db.prepare('SELECT id, amount, status, created_at, gift FROM withdrawals WHERE tg_id=? ORDER BY id DESC LIMIT 10').all(u.tg_id).map((r) => ({ ...r, gift_name: giftName(r.gift) }));
-    return { id: x.tg_id, name: x.first_name, username: x.username, since: x.created_at, balance: x.balance, crash: { ...c }, mines: { ...m }, withdrawals: w, admin: ADMIN_IDS.has(x.tg_id) };
-  },
-  '/api/deposit': (u, b) => {
-    const amount = b.amount;
-    if (!Number.isSafeInteger(amount) || amount < 1 || amount > 1000000000) throw new Error('bad_amount');
-    return tx(() => {
-      const x = getUser(u.tg_id);
-      if (db.prepare(`SELECT 1 FROM deposit_requests WHERE tg_id=? AND status='pending'`).get(x.tg_id)) throw new Error('dep_pending');
-      const id = db.prepare('INSERT INTO deposit_requests(tg_id,amount,created_at,updated_at) VALUES(?,?,?,?)').run(x.tg_id, amount, Date.now(), Date.now()).lastInsertRowid;
-      try { notifyDeposit(id, x, amount); } catch (e) { console.error('deposit notify:', e.message); }
-      return { id };
-    });
+    return { id: x.tg_id, name: x.first_name, username: x.username, since: x.created_at, balance: x.balance, crash: { ...c }, mines: { ...m }, chicken: { ...ch }, withdrawals: w, admin: ADMIN_IDS.has(x.tg_id) };
   },
   '/api/withdraw': (u, b) => { // request only: funds are held until the request is reviewed
     const amount = b.amount;
@@ -346,15 +464,6 @@ const routes = {
       return { balance: getUser(x.tg_id).balance, id };
     });
   },
-  '/api/gifts/sell': (u, b) => tx(() => {
-    const it = Number.isInteger(b.item) ? db.prepare('SELECT * FROM inventory WHERE id=? AND tg_id=?').get(b.item, u.tg_id) : null;
-    if (!it) throw new Error('no_game');
-    const pay = Math.floor(GIFT[it.gift].p * SELL_RATE);
-    db.prepare('DELETE FROM inventory WHERE id=?').run(it.id);
-    db.prepare('UPDATE users SET balance=balance+? WHERE tg_id=?').run(pay, u.tg_id);
-    led(u.tg_id, pay, 'gift_sell', it.id);
-    return { balance: getUser(u.tg_id).balance, payout: pay };
-  }),
   '/api/gifts/withdraw': (u, b) => { // request to take a gift out; the item is held until the admin decides
     if (!Number.isInteger(b.item)) throw new Error('no_game');
     return tx(() => {
@@ -386,7 +495,7 @@ const routes = {
     });
   },
   '/api/seed': (u, b) => { // rotate seed and reveal the old one so past rounds can be verified
-    if (flying(u.tg_id) || activeMines(u.tg_id)) throw new Error('round_active');
+    if (activeMines(u.tg_id) || activeChicken(u.tg_id)) throw new Error('round_active');
     const x = getUser(u.tg_id), s = newSeed();
     const cs = typeof b.clientSeed === 'string' && /^[\w-]{1,32}$/.test(b.clientSeed) ? b.clientSeed : x.client_seed;
     const old = { serverSeed: dec(x.seed_enc), clientSeed: x.client_seed, rounds: x.nonce };
@@ -394,7 +503,7 @@ const routes = {
     return { revealed: old, fair: fair(getUser(x.tg_id)) };
   },
 };
-const KNOWN = new Set(['dep_pending', 'bad_amount', 'bad_auto', 'bad_game', 'bad_cell', 'no_game', 'forbidden', 'wd_pending', 'inv_full', 'no_balance', 'round_active', 'bad_json', 'big']);
+const KNOWN = new Set(['bad_amount', 'bad_auto', 'bad_game', 'bad_cell', 'no_game', 'forbidden', 'wd_pending', 'inv_full', 'no_balance', 'round_active', 'late', 'bad_json', 'big']);
 
 /* ---------- admin security + Telegram bot notifications ---------- */
 const audit = (admin, action, target, detail = '') =>
@@ -406,10 +515,11 @@ function assertAdmin(u, t, what) { // whitelist + Telegram signature (checked ea
   throw new Error('forbidden');
 }
 function stats(id) {
-  const c = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) bet FROM rounds WHERE tg_id=? AND amount>0 AND status!='flying'`).get(id);
+  const c = crashAgg(id);
+  const h = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) bet FROM chicken WHERE tg_id=? AND status!='active'`).get(id);
   const m = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) bet FROM mines WHERE tg_id=? AND status!='active'`).get(id);
   const g = db.prepare('SELECT COUNT(*) n FROM upgrades WHERE tg_id=?').get(id);
-  return { games: c.n + m.n + g.n, wagered: c.bet + m.bet };
+  return { games: c.n + m.n + g.n + h.n, wagered: c.bet + m.bet + h.bet };
 }
 const num = (n) => Number(n).toLocaleString('ru-RU');
 const fmtDate = (ms) => new Date(ms).toLocaleString('ru-RU', { timeZone: TZ, day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
@@ -430,31 +540,6 @@ function notifyWithdraw(wid, x, amount, before) { // the bot sends the admin the
   const kb = { inline_keyboard: [[{ text: '✅ Выплачено', callback_data: `wd:paid:${wid}` }, { text: '❌ Отклонить', callback_data: `wd:rej:${wid}` }]] };
   for (const id of ADMIN_IDS) sendSafe(id, text, { reply_markup: kb });
   sendSafe(x.tg_id, `✅ Заявка #${wid} на ${num(amount)} ◆ принята.\nВывод делается в течение 8 часов.`);
-}
-function notifyDeposit(did, x, amount) {
-  const s = stats(x.tg_id);
-  const text = `💰 Заявка на пополнение #${did}\\n\\n🆔 ${x.tg_id}${x.username ? ` (@${x.username})` : ''}${x.first_name ? ` · ${x.first_name}` : ''}\\n`
-    + `🎮 Сыграно игр: ${s.games} (ставок на ${num(s.wagered)} ◆)\\n💵 Запросил: ${num(amount)} ◆\\n`
-    + `💼 Сумма на счету: ${num(getUser(x.tg_id).balance)} ◆\\n🕒 ${fmtDate(Date.now())}\\n\\nПополнение будет зачислено после подтверждения.`;
-  const kb = { inline_keyboard: [[{ text: '✅ Зачислить', callback_data: `dp:paid:${did}` }, { text: '❌ Отклонить', callback_data: `dp:rej:${did}` }]] };
-  for (const id of ADMIN_IDS) sendSafe(id, text, { reply_markup: kb });
-  sendSafe(x.tg_id, `✅ Заявка #${did} на пополнение ${num(amount)} ◆ отправлена администратору.`);
-}
-function reviewDeposit(id, status, adminId) {
-  const d = tx(() => {
-    const r = db.prepare(`SELECT * FROM deposit_requests WHERE id=? AND status='pending'`).get(id);
-    if (!r) throw new Error('no_game');
-    db.prepare('UPDATE deposit_requests SET status=?, updated_at=? WHERE id=?').run(status, Date.now(), r.id);
-    if (status === 'paid') {
-      db.prepare('UPDATE users SET balance=balance+? WHERE tg_id=?').run(r.amount, r.tg_id);
-      led(r.tg_id, r.amount, 'admin_adjust', null);
-    }
-    audit(adminId, `deposit_${status}`, r.tg_id, `#${r.id} ${r.amount}`);
-    return r;
-  });
-  sendSafe(d.tg_id, status === 'paid'
-    ? `💰 Заявка #${d.id} подтверждена. Зачислено ${num(d.amount)} ◆. Баланс: ${num(getUser(d.tg_id).balance)} ◆`
-    : `❌ Заявка #${d.id} на пополнение ${num(d.amount)} ◆ отклонена.`);
 }
 function notifyGiftWithdraw(wid, x, g) {
   const s = stats(x.tg_id);
@@ -482,16 +567,13 @@ function reviewWithdrawal(id, status, adminId) {
 }
 async function handleUpdate(up) { // buttons under the admin's message
   const cb = up.callback_query; if (!cb) return;
-  const m = /^(wd|dp):(paid|rej):(\\d+)$/.exec(cb.data || ''); if (!m) return;
+  const m = /^wd:(paid|rej):(\d+)$/.exec(cb.data || ''); if (!m) return;
   const answer = (text) => tgCall('answerCallbackQuery', { callback_query_id: cb.id, text, show_alert: true }).catch(() => {});
   if (!ADMIN_IDS.has(cb.from.id)) { audit(cb.from.id, 'denied', null, 'bot button'); return answer('Нет доступа'); }
-  const status = m[2] === 'paid' ? 'paid' : 'rejected';
-  try {
-    if (m[1] === 'wd') reviewWithdrawal(Number(m[3]), status, cb.from.id);
-    else reviewDeposit(Number(m[3]), status, cb.from.id);
-  } catch { return answer('Заявка уже обработана'); }
-  await answer(m[1] === 'dp' ? (status === 'paid' ? 'Пополнение зачислено' : 'Заявка отклонена') : (status === 'paid' ? 'Отмечено: выплачено' : 'Отклонено, деньги возвращены игроку'));
-  if (cb.message) await tgCall('editMessageText', { chat_id: cb.message.chat.id, message_id: cb.message.message_id, text: `${cb.message.text}\\n\\n${status === 'paid' ? '✅ ВЫПОЛНЕНО' : '❌ ОТКЛОНЕНО'} · ${fmtDate(Date.now())}` }).catch(() => {});
+  const status = m[1] === 'paid' ? 'paid' : 'rejected';
+  try { reviewWithdrawal(Number(m[2]), status, cb.from.id); } catch { return answer('Заявка уже обработана'); }
+  await answer(status === 'paid' ? 'Отмечено: выплачено' : 'Отклонено, деньги возвращены игроку');
+  if (cb.message) await tgCall('editMessageText', { chat_id: cb.message.chat.id, message_id: cb.message.message_id, text: `${cb.message.text}\n\n${status === 'paid' ? '✅ ВЫПЛАЧЕНО' : '❌ ОТКЛОНЕНО'} · ${fmtDate(Date.now())}` }).catch(() => {});
 }
 async function pollBot() {
   await tgCall('deleteWebhook', {}).catch(() => {});
