@@ -179,6 +179,13 @@ input:disabled{opacity:.45}
     <div class="panel"><div class="lbl">Профиль</div><div id="pinfo"></div></div>
     <div class="panel"><div class="lbl">Статистика</div><div id="pstats"></div></div>
     <div class="panel">
+      <div class="lbl">Пополнение баланса (минимум 100 ⭐)</div>
+      <input id="dep" type="number" inputmode="numeric" min="100" step="1" placeholder="Сумма в звёздах" style="margin-bottom:8px">
+      <button class="go" id="depgo">⭐ Подать заявку на пополнение</button>
+      <div class="mmsg" id="depmsg"></div>
+      <div class="lbl" style="text-align:center">Заявка будет отправлена администратору. Баланс изменится после подтверждения.</div>
+    </div>
+    <div class="panel">
       <div class="lbl">Вывод средств (минимум 50 ◆)</div>
       <input id="wd" type="number" inputmode="numeric" min="50" placeholder="Сумма" style="margin-bottom:8px">
       <button class="go" id="wdgo">Подать заявку на вывод</button>
@@ -354,7 +361,7 @@ input:disabled{opacity:.45}
   }
   function errText(e){
     var m=e&&e.message;
-    return m==='unauthorized'?((tg&&tg.initData)?'Ошибка входа: проверь BOT_TOKEN на сервере':'Открой игру через Telegram'):m==='no_balance'?'Не хватает баланса':m==='round_active'?'Ставка уже есть':m==='late'?'Поздно: ставки закрыты или раунд закончился':m==='slow_down'?'Слишком часто':m==='wd_pending'?'Предыдущая заявка ещё на рассмотрении':m==='bad_amount'?'Неверная сумма':m==='forbidden'?'Нет доступа (админ-сессия старше часа: закрой и открой приложение)':m==='no_game'?'Не найдено':m==='inv_full'?'Инвентарь полон':'Ошибка связи ('+(m||'?')+')';
+    return m==='unauthorized'?((tg&&tg.initData)?'Ошибка входа: проверь BOT_TOKEN на сервере':'Открой игру через Telegram'):m==='no_balance'?'Не хватает баланса':m==='round_active'?'Ставка уже есть':m==='late'?'Поздно: ставки закрыты или раунд закончился':m==='slow_down'?'Слишком часто':m==='wd_pending'?'Предыдущая заявка ещё на рассмотрении':m==='bad_deposit'?'Минимальное пополнение — 100 звёзд':m==='deposit_pending'?'Заявка на пополнение уже на рассмотрении':m==='bad_amount'?'Неверная сумма':m==='forbidden'?'Нет доступа (админ-сессия старше часа: закрой и открой приложение)':m==='no_game'?'Не найдено':m==='inv_full'?'Инвентарь полон':'Ошибка связи ('+(m||'?')+')';
   }
   function showFair(f){if(f){var t='Provably fair · hash '+f.hash.slice(0,16)+'… · nonce '+f.nonce;$('fair2').textContent=t;$('fair3').textContent=t}}
   var snap=null,off=0,authed=false,pollBusy=false,actBusy=false,lastId=0,histKey='',note=null;
@@ -653,6 +660,14 @@ input:disabled{opacity:.45}
       loadOps();$('padmin').hidden=!r.admin;if(r.admin)loadAdmin();
     }).catch(function(e){$('wdmsg').textContent=errText(e)});
   }
+  $('depgo').onclick=function(){
+    var a=Math.floor(+$('dep').value),m=$('depmsg');
+    if(!(a>=100)){m.textContent='Минимальная сумма пополнения — 100 ⭐';m.className='mmsg l';return}
+    $('depgo').disabled=true;
+    api('/api/deposit',{amount:a}).then(function(r){
+      $('dep').value='';m.textContent='Заявка отправлена администратору';m.className='mmsg w';
+    }).catch(function(e){m.textContent=e.message==='deposit_pending'?'У тебя уже есть заявка на рассмотрении':errText(e);m.className='mmsg l'}).finally(function(){$('depgo').disabled=false});
+  };
   $('wdgo').onclick=function(){if(tg&&tg.requestWriteAccess){try{tg.requestWriteAccess()}catch(e){}}
     var a=Math.floor(+$('wd').value),m=$('wdmsg');
     if(!(a>=50)){m.textContent='Минимум 50 ◆';m.className='mmsg l';return}

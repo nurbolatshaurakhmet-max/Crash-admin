@@ -42,7 +42,10 @@ db.exec(`CREATE TABLE IF NOT EXISTS mines(
 CREATE UNIQUE INDEX IF NOT EXISTS one_mines ON mines(tg_id) WHERE status='active';`);
 db.exec(`CREATE TABLE IF NOT EXISTS withdrawals(
   id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER NOT NULL REFERENCES users(tg_id),
-  amount INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);`);
+  amount INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS deposit_requests(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER NOT NULL REFERENCES users(tg_id),
+  amount INTEGER NOT NULL CHECK(amount >= 100), status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL);`);
 const SIZES = [3, 5, 7, 10], MINES = [3, 4, 5, 8], EDGE = 0.97, MIN_WD = 50;
 // ADMIN_ID: your Telegram ID (several: comma separated). Admin = Telegram-signed identity + ID whitelist + fresh session.
 const ADMIN_IDS = new Set((process.env.ADMIN_ID || '').split(',').map((x) => Number(x.trim())).filter((n) => Number.isSafeInteger(n) && n > 0));
@@ -396,6 +399,14 @@ const routes = {
     const w = db.prepare('SELECT id, amount, status, created_at, gift FROM withdrawals WHERE tg_id=? ORDER BY id DESC LIMIT 10').all(u.tg_id).map((r) => ({ ...r, gift_name: giftName(r.gift) }));
     return { id: x.tg_id, name: x.first_name, username: x.username, since: x.created_at, balance: x.balance, crash: { ...c }, mines: { ...m }, chicken: { ...ch }, withdrawals: w, admin: ADMIN_IDS.has(x.tg_id) };
   },
+  '/api/deposit': (u, b) => { // manual top-up request in Telegram Stars; admin is notified
+    const amount = b.amount;
+    if (!Number.isSafeInteger(amount) || amount < 100 || amount > 1000000) throw new Error('bad_deposit');
+    if (db.prepare("SELECT 1 FROM deposit_requests WHERE tg_id=? AND status='pending'").get(u.tg_id)) throw new Error('deposit_pending');
+    const id = db.prepare('INSERT INTO deposit_requests(tg_id,amount,created_at) VALUES(?,?,?)').run(u.tg_id, amount, Date.now()).lastInsertRowid;
+    notifyDeposit(id, u, amount);
+    return { ok: true, id };
+  },
   '/api/withdraw': (u, b) => { // request only: funds are held until the request is reviewed
     const amount = b.amount;
     if (!Number.isSafeInteger(amount) || amount < MIN_WD) throw new Error('bad_amount');
@@ -503,7 +514,7 @@ const routes = {
     return { revealed: old, fair: fair(getUser(x.tg_id)) };
   },
 };
-const KNOWN = new Set(['bad_amount', 'bad_auto', 'bad_game', 'bad_cell', 'no_game', 'forbidden', 'wd_pending', 'inv_full', 'no_balance', 'round_active', 'late', 'bad_json', 'big']);
+const KNOWN = new Set(['bad_deposit', 'deposit_pending', 'bad_amount', 'bad_auto', 'bad_game', 'bad_cell', 'no_game', 'forbidden', 'wd_pending', 'inv_full', 'no_balance', 'round_active', 'late', 'bad_json', 'big']);
 
 /* ---------- admin security + Telegram bot notifications ---------- */
 const audit = (admin, action, target, detail = '') =>
@@ -532,6 +543,16 @@ async function tgCall(method, body, ms = 10000) {
   return j.result;
 }
 const sendSafe = (chat_id, text, extra = {}) => tgCall('sendMessage', { chat_id, text, ...extra }).catch((e) => console.error('tg send:', e.message));
+function notifyDeposit(id, x, amount) {
+  const text = `⭐ Заявка на пополнение #${id}\n\n`
+    + `👤 ${x.first_name || 'Игрок'}${x.username ? ` (@${x.username})` : ''}\n`
+    + `🆔 Telegram ID: ${x.tg_id}\n`
+    + `⭐ Хочет пополнить: ${num(amount)} звёзд (Telegram Stars)\n`
+    + `🕒 ${fmtDate(Date.now())}\n\n`
+    + `Пользователь отправил заявку на ручное пополнение.`;
+  for (const adminId of ADMIN_IDS) sendSafe(adminId, text);
+  sendSafe(x.tg_id, `✅ Заявка на пополнение #${id} на ${num(amount)} звёзд отправлена администратору. После проверки с вами свяжутся.`);
+}
 function notifyWithdraw(wid, x, amount, before) { // the bot sends the admin the player's data
   const s = stats(x.tg_id);
   const text = `💸 Заявка на вывод #${wid}\n\n🆔 ${x.tg_id}${x.username ? ` (@${x.username})` : ''}${x.first_name ? ` · ${x.first_name}` : ''}\n`
