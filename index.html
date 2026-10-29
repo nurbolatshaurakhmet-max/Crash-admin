@@ -93,9 +93,25 @@ input:disabled{opacity:.45}
 .lane.pass{border-color:var(--cyan);background:#06222c;box-shadow:0 0 10px #19f2ff66}
 .lane.cur{border-color:var(--lime);box-shadow:0 0 14px #7dff6a99}
 .lane.burn{border-color:var(--red);background:#2a0612;box-shadow:0 0 14px #ff3b5ccc}
+
+/* NEON CRASH loading screen */
+#neon-loader{position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:18px;padding:24px;background:radial-gradient(ellipse at 50% 42%,#211044 0%,#090516 55%,#03020a 100%);opacity:1;visibility:visible;transition:opacity .55s ease,visibility .55s ease}
+#neon-loader.done{opacity:0;visibility:hidden;pointer-events:none}
+.loader-ring{width:126px;height:126px;border-radius:50%;display:grid;place-items:center;border:3px solid transparent;border-top-color:#19f2ff;border-right-color:#ff2bd6;box-shadow:0 0 18px #19f2ff55,inset 0 0 18px #ff2bd633;animation:loaderSpin 1.15s linear infinite}
+.loader-rocket{font-size:58px;filter:drop-shadow(0 0 12px #19f2ff);animation:rocketBob .8s ease-in-out infinite alternate}
+.loader-title{font-size:26px;font-weight:1000;letter-spacing:3px;color:#19f2ff;text-shadow:0 0 10px #19f2ff,0 0 25px #19f2ff88}
+.loader-title span{color:#ff2bd6;text-shadow:0 0 10px #ff2bd6,0 0 25px #ff2bd688}
+.loader-caption{font-size:12px;letter-spacing:3px;color:#a99acb;text-transform:uppercase;animation:loaderBlink 1.2s ease-in-out infinite}
+.loader-track{width:min(230px,70vw);height:5px;border-radius:10px;background:#24153d;overflow:hidden;box-shadow:0 0 10px #19f2ff22}
+.loader-progress{height:100%;width:35%;border-radius:10px;background:linear-gradient(90deg,#19f2ff,#8d4dff,#ff2bd6);box-shadow:0 0 12px #19f2ff;animation:loaderProgress 1.25s ease-in-out infinite}
+@keyframes loaderSpin{to{transform:rotate(360deg)}}@keyframes rocketBob{to{transform:translateY(-7px) rotate(-7deg)}}@keyframes loaderBlink{50%{opacity:.45}}@keyframes loaderProgress{0%{transform:translateX(-120%)}100%{transform:translateX(360%)}}
+@media(prefers-reduced-motion:reduce){.loader-ring,.loader-rocket,.loader-caption,.loader-progress{animation:none!important}}
+
 </style>
 </head>
 <body>
+<div id="neon-loader" role="status" aria-label="Загрузка NEON CRASH"><div class="loader-ring"><div class="loader-rocket">🚀</div></div><div class="loader-title">NEON <span>CRASH</span></div><div class="loader-caption">Подготавливаем игру</div><div class="loader-track"><div class="loader-progress"></div></div></div>
+
 <div class="app">
   <div class="top">
     <h1>NEON ARCADE <small style="font-size:11px;color:var(--dim);text-shadow:none">v10</small></h1>
@@ -799,6 +815,10 @@ input:disabled{opacity:.45}
   TABS.forEach(function(t){$('tab-'+t).onclick=function(){showTab(t)}});
   mSetup();mBuild();
 })();
+</script>
+
+<script>
+(function(){var loader=document.getElementById('neon-loader');if(!loader)return;var start=Date.now();function hideLoader(){var wait=Math.max(0,650-(Date.now()-start));setTimeout(function(){loader.classList.add('done');setTimeout(function(){if(loader.parentNode)loader.parentNode.removeChild(loader)},650)},wait)}if(document.readyState==='complete')hideLoader();else window.addEventListener('load',hideLoader,{once:true});setTimeout(function(){if(loader&&loader.parentNode&&!loader.classList.contains('done'))hideLoader()},10000)})();
 </script>
 </body>
 </html>
