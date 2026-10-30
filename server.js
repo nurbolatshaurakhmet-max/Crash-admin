@@ -42,10 +42,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS mines(
 CREATE UNIQUE INDEX IF NOT EXISTS one_mines ON mines(tg_id) WHERE status='active';`);
 db.exec(`CREATE TABLE IF NOT EXISTS withdrawals(
   id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER NOT NULL REFERENCES users(tg_id),
-  amount INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS deposit_requests(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER NOT NULL REFERENCES users(tg_id),
-  amount INTEGER NOT NULL CHECK(amount >= 100), status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL);`);
+  amount INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);`);
 const SIZES = [3, 5, 7, 10], MINES = [3, 4, 5, 8], EDGE = 0.97, MIN_WD = 50;
 // ADMIN_ID: your Telegram ID (several: comma separated). Admin = Telegram-signed identity + ID whitelist + fresh session.
 const ADMIN_IDS = new Set((process.env.ADMIN_ID || '').split(',').map((x) => Number(x.trim())).filter((n) => Number.isSafeInteger(n) && n > 0));
@@ -86,6 +83,36 @@ CREATE TABLE IF NOT EXISTS chicken(
   level TEXT NOT NULL, burn TEXT NOT NULL, step INTEGER NOT NULL DEFAULT 0, nonce INTEGER NOT NULL,
   status TEXT NOT NULL DEFAULT 'active', mult REAL, payout INTEGER);
 CREATE UNIQUE INDEX IF NOT EXISTS one_chicken ON chicken(tg_id) WHERE status='active';`);
+db.exec(`CREATE TABLE IF NOT EXISTS terms(tg_id INTEGER PRIMARY KEY, version INTEGER NOT NULL, ts INTEGER NOT NULL);`);
+const TERMS_VERSION = 1; // bump it to make everybody accept new rules again
+const WEBAPP_URL = process.env.WEBAPP_URL || ''; // public URL of the game, used for the "Играть" button in the bot
+const TERMS_TEXT = `ПОЛЬЗОВАТЕЛЬСКОЕ СОГЛАШЕНИЕ И ПРАВИЛА · Neon Arcade
+
+1. Общие положения
+Neon Arcade — игровое приложение в Telegram (Crash, Mines, Chicken Run, Апгрейд подарков). Пользоваться им могут только совершеннолетние (18+). Используя приложение, вы принимаете это соглашение.
+
+2. Аккаунт
+Один человек — один аккаунт Telegram. Мультиаккаунты, боты, скрипты, передача аккаунта и использование ошибок (багов) запрещены.
+
+3. Игры и риск
+Результат каждой игры определяется сервером случайно и не зависит от вашего устройства. Честность можно проверить: перед игрой публикуется хеш секретного ключа, а после игры сам ключ. Ставки окончательны. Любая игра связана с риском потерять ставку. Играйте только теми средствами, которые готовы потерять, и не пытайтесь отыграться любой ценой.
+
+4. Баланс, пополнение и вывод
+Пополнение и вывод выполняются вручную администратором. Заявки на вывод рассматриваются в течение 8 часов. Минимальная сумма вывода — ${MIN_WD} ◆. Администратор вправе запросить подтверждение данных и отклонить заявку при признаках нарушения правил.
+
+5. Запрещено
+Обман, использование уязвимостей, несколько аккаунтов, отмывание средств, оскорбления и попытки взлома. За нарушения аккаунт блокируется, а выигрыши, полученные нечестным путём, аннулируются.
+
+6. Данные
+Мы храним ваш Telegram ID, имя, username, баланс и историю операций, чтобы игра работала и заявки обрабатывались. Данные не передаются третьим лицам, кроме технических сервисов хостинга и случаев, предусмотренных законом.
+
+7. Ответственность
+Сервис предоставляется «как есть»: возможны сбои и технические работы. Администрация может изменять правила; при существенных изменениях потребуется принять их заново.
+
+8. Согласие
+Нажимая «Согласен», вы подтверждаете, что вам исполнилось 18 лет, вы действуете от своего имени и принимаете это соглашение.`;
+const hasAgreed = (id) => !!db.prepare('SELECT 1 FROM terms WHERE tg_id=? AND version>=?').get(id, TERMS_VERSION);
+const saveAgreement = (id) => db.prepare('INSERT INTO terms(tg_id,version,ts) VALUES(?,?,?) ON CONFLICT(tg_id) DO UPDATE SET version=excluded.version, ts=excluded.ts').run(id, TERMS_VERSION, Date.now());
 const BET_MS = 5000, END_MS = 3000; // betting window (5 s) and pause after the crash
 const CH_LEVELS = { easy: 0.92, mid: 0.85, hard: 0.75 }, CH_STEPS = 20; // chance to survive one step
 
@@ -385,6 +412,11 @@ const routes = {
     if (g.step < 1) throw new Error('bad_cell');
     return { result: 'win', step: g.step, ...endChicken(g, 'win', chMult(g.level, g.step)) };
   },
+  '/api/terms/accept': (u, b) => { // the only route (besides auth) that works before the rules are accepted
+    if (b.adult !== true) throw new Error('bad_game');
+    saveAgreement(u.tg_id);
+    return { ok: true };
+  },
   '/api/top': (u) => { // only first names are exposed, never usernames or IDs
     const top = db.prepare('SELECT tg_id, first_name, balance FROM users ORDER BY balance DESC LIMIT 10').all()
       .map((r, i) => ({ rank: i + 1, name: (r.first_name || 'Игрок').slice(0, 16), balance: r.balance, me: r.tg_id === u.tg_id }));
@@ -398,14 +430,6 @@ const routes = {
     const m = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) bet, COALESCE(SUM(payout),0) won, COALESCE(MAX(CASE WHEN status='win' THEN mult END),0) best FROM mines WHERE tg_id=? AND status!='active'`).get(u.tg_id);
     const w = db.prepare('SELECT id, amount, status, created_at, gift FROM withdrawals WHERE tg_id=? ORDER BY id DESC LIMIT 10').all(u.tg_id).map((r) => ({ ...r, gift_name: giftName(r.gift) }));
     return { id: x.tg_id, name: x.first_name, username: x.username, since: x.created_at, balance: x.balance, crash: { ...c }, mines: { ...m }, chicken: { ...ch }, withdrawals: w, admin: ADMIN_IDS.has(x.tg_id) };
-  },
-  '/api/deposit': (u, b) => { // manual top-up request in Telegram Stars; admin is notified
-    const amount = b.amount;
-    if (!Number.isSafeInteger(amount) || amount < 100 || amount > 1000000) throw new Error('bad_deposit');
-    if (db.prepare("SELECT 1 FROM deposit_requests WHERE tg_id=? AND status='pending'").get(u.tg_id)) throw new Error('deposit_pending');
-    const id = db.prepare('INSERT INTO deposit_requests(tg_id,amount,created_at) VALUES(?,?,?)').run(u.tg_id, amount, Date.now()).lastInsertRowid;
-    notifyDeposit(id, u, amount);
-    return { ok: true, id };
   },
   '/api/withdraw': (u, b) => { // request only: funds are held until the request is reviewed
     const amount = b.amount;
@@ -514,7 +538,7 @@ const routes = {
     return { revealed: old, fair: fair(getUser(x.tg_id)) };
   },
 };
-const KNOWN = new Set(['bad_deposit', 'deposit_pending', 'bad_amount', 'bad_auto', 'bad_game', 'bad_cell', 'no_game', 'forbidden', 'wd_pending', 'inv_full', 'no_balance', 'round_active', 'late', 'bad_json', 'big']);
+const KNOWN = new Set(['bad_amount', 'bad_auto', 'bad_game', 'bad_cell', 'no_game', 'forbidden', 'wd_pending', 'inv_full', 'no_balance', 'round_active', 'late', 'terms', 'bad_json', 'big']);
 
 /* ---------- admin security + Telegram bot notifications ---------- */
 const audit = (admin, action, target, detail = '') =>
@@ -543,16 +567,6 @@ async function tgCall(method, body, ms = 10000) {
   return j.result;
 }
 const sendSafe = (chat_id, text, extra = {}) => tgCall('sendMessage', { chat_id, text, ...extra }).catch((e) => console.error('tg send:', e.message));
-function notifyDeposit(id, x, amount) {
-  const text = `⭐ Заявка на пополнение #${id}\n\n`
-    + `👤 ${x.first_name || 'Игрок'}${x.username ? ` (@${x.username})` : ''}\n`
-    + `🆔 Telegram ID: ${x.tg_id}\n`
-    + `⭐ Хочет пополнить: ${num(amount)} звёзд (Telegram Stars)\n`
-    + `🕒 ${fmtDate(Date.now())}\n\n`
-    + `Пользователь отправил заявку на ручное пополнение.`;
-  for (const adminId of ADMIN_IDS) sendSafe(adminId, text);
-  sendSafe(x.tg_id, `✅ Заявка на пополнение #${id} на ${num(amount)} звёзд отправлена администратору. После проверки с вами свяжутся.`);
-}
 function notifyWithdraw(wid, x, amount, before) { // the bot sends the admin the player's data
   const s = stats(x.tg_id);
   const text = `💸 Заявка на вывод #${wid}\n\n🆔 ${x.tg_id}${x.username ? ` (@${x.username})` : ''}${x.first_name ? ` · ${x.first_name}` : ''}\n`
@@ -586,8 +600,27 @@ function reviewWithdrawal(id, status, adminId) {
   if (w.gift) sendSafe(w.tg_id, status === 'paid' ? `🎁 Заявка #${w.id}: ${giftName(w.gift)} выведен.` : `❌ Заявка #${w.id} отклонена, ${giftName(w.gift)} вернулся в инвентарь.`);
   else sendSafe(w.tg_id, status === 'paid' ? `💸 Заявка #${w.id} на ${num(w.amount)} ◆ выплачена.` : `❌ Заявка #${w.id} отклонена, ${num(w.amount)} ◆ возвращены на счёт.`);
 }
-async function handleUpdate(up) { // buttons under the admin's message
+const WELCOME = '👋 Добро пожаловать в Neon Arcade!\n\n🚀 Crash · 💎 Mines · 🐔 Chicken Run · 🎁 Апгрейд подарков\n\nПеред началом прочитай правила и пользовательское соглашение. Нажимая «Согласен», ты подтверждаешь, что тебе исполнилось 18 лет и ты принимаешь правила.';
+const playKb = () => (WEBAPP_URL ? { inline_keyboard: [[{ text: '🎮 Играть', web_app: { url: WEBAPP_URL } }]] } : undefined);
+function sendWelcome(chatId, uid) { // answer to /start
+  if (hasAgreed(uid)) return sendSafe(chatId, `👋 С возвращением! Нажми «Играть», чтобы открыть Neon Arcade.${WEBAPP_URL ? '' : '\n(Кнопка игры слева от поля ввода.)'}`, { reply_markup: playKb() });
+  return sendSafe(chatId, WELCOME, { reply_markup: { inline_keyboard: [[{ text: '📄 Читать правила', callback_data: 'terms:rules' }], [{ text: '✅ Согласен', callback_data: 'terms:yes' }, { text: '❌ Не согласен', callback_data: 'terms:no' }]] } });
+}
+async function handleTerms(cb) {
+  const chat = cb.message?.chat.id ?? cb.from.id;
+  const ack = (text, alert = false) => tgCall('answerCallbackQuery', { callback_query_id: cb.id, text, show_alert: alert }).catch(() => {});
+  if (cb.data === 'terms:rules') { await ack(); return sendSafe(chat, TERMS_TEXT); }
+  if (cb.data === 'terms:no') { await ack('Без согласия доступ к игре закрыт.', true); return; }
+  if (cb.data === 'terms:yes') {
+    saveAgreement(cb.from.id);
+    await ack('Спасибо! Доступ открыт.');
+    return sendSafe(chat, `✅ Правила приняты. Приятной игры!\n\nОткрой игру${WEBAPP_URL ? ' кнопкой ниже.' : ' кнопкой меню слева от поля ввода.'}`, { reply_markup: playKb() });
+  }
+}
+async function handleUpdate(up) { // /start, rules buttons and the admin's buttons under withdrawal messages
+  if (up.message && /^\/start(\s|$)/.test(up.message.text || '')) return sendWelcome(up.message.chat.id, up.message.from.id);
   const cb = up.callback_query; if (!cb) return;
+  if ((cb.data || '').startsWith('terms:')) return handleTerms(cb);
   const m = /^wd:(paid|rej):(\d+)$/.exec(cb.data || ''); if (!m) return;
   const answer = (text) => tgCall('answerCallbackQuery', { callback_query_id: cb.id, text, show_alert: true }).catch(() => {});
   if (!ADMIN_IDS.has(cb.from.id)) { audit(cb.from.id, 'denied', null, 'bot button'); return answer('Нет доступа'); }
@@ -601,7 +634,7 @@ async function pollBot() {
   let offset = 0;
   for (;;) {
     try {
-      const ups = await tgCall('getUpdates', { offset, timeout: 25, allowed_updates: ['callback_query'] }, 35000);
+      const ups = await tgCall('getUpdates', { offset, timeout: 25, allowed_updates: ['callback_query', 'message'] }, 35000);
       for (const up of ups) { offset = up.update_id + 1; await handleUpdate(up).catch((e) => console.error('update:', e.message)); }
     } catch (e) { console.error('poll:', e.message); await new Promise((r) => setTimeout(r, 4000)); }
   }
@@ -636,6 +669,10 @@ const srv = http.createServer(async (req, res) => {
     if (!tgUser) return send(res, 401, { error: 'unauthorized' });
     if (limited(tgUser.id)) return send(res, 429, { error: 'slow_down' });
     const body = await readBody(req);
+    if (!hasAgreed(tgUser.id)) { // nothing is created or served until the rules are accepted
+      if (req.url === '/api/auth') return send(res, 200, { terms: true, version: TERMS_VERSION, text: TERMS_TEXT });
+      if (req.url !== '/api/terms/accept') return send(res, 400, { error: 'terms' });
+    }
     send(res, 200, fn(ensureUser(tgUser), body, tgUser));
   } catch (e) {
     if (!KNOWN.has(e.message)) console.error(e);
@@ -647,4 +684,4 @@ srv.keepAliveTimeout = 65000;
 srv.headersTimeout = 66000;
 process.on('unhandledRejection', (e) => console.error('unhandledRejection:', e?.message ?? e));
 process.on('uncaughtException', (e) => console.error('uncaughtException:', e?.message ?? e));
-if (ADMIN_IDS.size) pollBot();
+pollBot(); // the bot answers /start for everybody, so it always runs

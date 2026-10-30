@@ -93,28 +93,27 @@ input:disabled{opacity:.45}
 .lane.pass{border-color:var(--cyan);background:#06222c;box-shadow:0 0 10px #19f2ff66}
 .lane.cur{border-color:var(--lime);box-shadow:0 0 14px #7dff6a99}
 .lane.burn{border-color:var(--red);background:#2a0612;box-shadow:0 0 14px #ff3b5ccc}
-
-/* NEON CRASH loading screen */
-#neon-loader{position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:18px;padding:24px;background:radial-gradient(ellipse at 50% 42%,#211044 0%,#090516 55%,#03020a 100%);opacity:1;visibility:visible;transition:opacity .55s ease,visibility .55s ease}
-#neon-loader.done{opacity:0;visibility:hidden;pointer-events:none}
-.loader-ring{width:126px;height:126px;border-radius:50%;display:grid;place-items:center;border:3px solid transparent;border-top-color:#19f2ff;border-right-color:#ff2bd6;box-shadow:0 0 18px #19f2ff55,inset 0 0 18px #ff2bd633;animation:loaderSpin 1.15s linear infinite}
-.loader-rocket{font-size:58px;filter:drop-shadow(0 0 12px #19f2ff);animation:rocketBob .8s ease-in-out infinite alternate}
-.loader-title{font-size:26px;font-weight:1000;letter-spacing:3px;color:#19f2ff;text-shadow:0 0 10px #19f2ff,0 0 25px #19f2ff88}
-.loader-title span{color:#ff2bd6;text-shadow:0 0 10px #ff2bd6,0 0 25px #ff2bd688}
-.loader-caption{font-size:12px;letter-spacing:3px;color:#a99acb;text-transform:uppercase;animation:loaderBlink 1.2s ease-in-out infinite}
-.loader-track{width:min(230px,70vw);height:5px;border-radius:10px;background:#24153d;overflow:hidden;box-shadow:0 0 10px #19f2ff22}
-.loader-progress{height:100%;width:35%;border-radius:10px;background:linear-gradient(90deg,#19f2ff,#8d4dff,#ff2bd6);box-shadow:0 0 12px #19f2ff;animation:loaderProgress 1.25s ease-in-out infinite}
-@keyframes loaderSpin{to{transform:rotate(360deg)}}@keyframes rocketBob{to{transform:translateY(-7px) rotate(-7deg)}}@keyframes loaderBlink{50%{opacity:.45}}@keyframes loaderProgress{0%{transform:translateX(-120%)}100%{transform:translateX(360%)}}
-@media(prefers-reduced-motion:reduce){.loader-ring,.loader-rocket,.loader-caption,.loader-progress{animation:none!important}}
-
+#terms{position:fixed;inset:0;z-index:100;background:var(--bg);overflow-y:auto;padding:calc(14px + env(safe-area-inset-top,0px)) 14px calc(24px + env(safe-area-inset-bottom,0px))}
+.tbox{max-width:480px;margin:0 auto}.tbox h2{color:var(--cyan);text-shadow:0 0 10px var(--cyan);font-size:19px;margin:6px 0}
+#termstext{white-space:pre-wrap;font-size:14px;line-height:1.45;background:var(--panel);border:1px solid #3a2a63;border-radius:14px;padding:12px;margin:10px 0}
+.tck{display:flex;gap:10px;align-items:flex-start;font-size:14px;margin:12px 0}
+.tck input{width:24px;height:24px;flex:none;margin:0;padding:0;box-shadow:none}
 </style>
 </head>
 <body>
-<div id="neon-loader" role="status" aria-label="Загрузка NEON CRASH"><div class="loader-ring"><div class="loader-rocket">🚀</div></div><div class="loader-title">NEON <span>CRASH</span></div><div class="loader-caption">Подготавливаем игру</div><div class="loader-track"><div class="loader-progress"></div></div></div>
-
+<div id="terms" hidden>
+  <div class="tbox">
+    <h2>Пользовательское соглашение и правила</h2>
+    <div id="termstext"></div>
+    <label class="tck"><input type="checkbox" id="tcheck"><span>Мне исполнилось 18 лет, я прочитал(а) и принимаю правила</span></label>
+    <button class="go" id="tyes" disabled>✅ Согласен</button>
+    <button class="mc" id="tno" style="width:100%;margin-top:8px">❌ Не согласен</button>
+    <div class="mmsg" id="tmsg"></div>
+  </div>
+</div>
 <div class="app">
   <div class="top">
-    <h1>NEON ARCADE <small style="font-size:11px;color:var(--dim);text-shadow:none">v10</small></h1>
+    <h1>NEON ARCADE <small style="font-size:11px;color:var(--dim);text-shadow:none">v11</small></h1>
     <div style="display:flex;align-items:center"><div class="bal"><span id="bal">0</span> ◆</div><button class="mute on" id="mus" aria-label="Музыка">🎵</button><button class="mute" id="mute" aria-label="Звук">🔊</button></div>
   </div>
   <nav class="tabs"><button id="tab-crash" class="on">🚀 Crash</button><button id="tab-mines">💎 Mines</button><button id="tab-chicken">🐔 Chicken</button><button id="tab-up">🎁 Апгрейд</button><button id="tab-top">🏆 Топ</button><button id="tab-profile">👤 Профиль</button></nav>
@@ -194,13 +193,6 @@ input:disabled{opacity:.45}
   <section id="t-profile" hidden>
     <div class="panel"><div class="lbl">Профиль</div><div id="pinfo"></div></div>
     <div class="panel"><div class="lbl">Статистика</div><div id="pstats"></div></div>
-    <div class="panel">
-      <div class="lbl">Пополнение баланса (минимум 100 ⭐)</div>
-      <input id="dep" type="number" inputmode="numeric" min="100" step="1" placeholder="Сумма в звёздах" style="margin-bottom:8px">
-      <button class="go" id="depgo">⭐ Подать заявку на пополнение</button>
-      <div class="mmsg" id="depmsg"></div>
-      <div class="lbl" style="text-align:center">Заявка будет отправлена администратору. Баланс изменится после подтверждения.</div>
-    </div>
     <div class="panel">
       <div class="lbl">Вывод средств (минимум 50 ◆)</div>
       <input id="wd" type="number" inputmode="numeric" min="50" placeholder="Сумма" style="margin-bottom:8px">
@@ -373,11 +365,11 @@ input:disabled{opacity:.45}
   function lock(on){$('bet').disabled=on;$('auto').disabled=on;document.querySelectorAll('.chip').forEach(function(c){c.disabled=on})}
   function api(path,body){
     return fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Tg-Init':tg?tg.initData:''},body:JSON.stringify(body||{})})
-      .then(function(r){return r.text().then(function(t){var j=null;try{j=t?JSON.parse(t):null}catch(e){}if(!r.ok||j===null)throw new Error(j&&j.error?j.error:'http_'+r.status);return j})});
+      .then(function(r){return r.text().then(function(t){var j=null;try{j=t?JSON.parse(t):null}catch(e){}if(!r.ok||j===null){var msg=j&&j.error?j.error:'http_'+r.status;if(msg==='terms')setTimeout(boot,0);throw new Error(msg)}return j})});
   }
   function errText(e){
     var m=e&&e.message;
-    return m==='unauthorized'?((tg&&tg.initData)?'Ошибка входа: проверь BOT_TOKEN на сервере':'Открой игру через Telegram'):m==='no_balance'?'Не хватает баланса':m==='round_active'?'Ставка уже есть':m==='late'?'Поздно: ставки закрыты или раунд закончился':m==='slow_down'?'Слишком часто':m==='wd_pending'?'Предыдущая заявка ещё на рассмотрении':m==='bad_deposit'?'Минимальное пополнение — 100 звёзд':m==='deposit_pending'?'Заявка на пополнение уже на рассмотрении':m==='bad_amount'?'Неверная сумма':m==='forbidden'?'Нет доступа (админ-сессия старше часа: закрой и открой приложение)':m==='no_game'?'Не найдено':m==='inv_full'?'Инвентарь полон':'Ошибка связи ('+(m||'?')+')';
+    return m==='unauthorized'?((tg&&tg.initData)?'Ошибка входа: проверь BOT_TOKEN на сервере':'Открой игру через Telegram'):m==='terms'?'Нужно принять правила':m==='no_balance'?'Не хватает баланса':m==='round_active'?'Ставка уже есть':m==='late'?'Поздно: ставки закрыты или раунд закончился':m==='slow_down'?'Слишком часто':m==='wd_pending'?'Предыдущая заявка ещё на рассмотрении':m==='bad_amount'?'Неверная сумма':m==='forbidden'?'Нет доступа (админ-сессия старше часа: закрой и открой приложение)':m==='no_game'?'Не найдено':m==='inv_full'?'Инвентарь полон':'Ошибка связи ('+(m||'?')+')';
   }
   function showFair(f){if(f){var t='Provably fair · hash '+f.hash.slice(0,16)+'… · nonce '+f.nonce;$('fair2').textContent=t;$('fair3').textContent=t}}
   var snap=null,off=0,authed=false,pollBusy=false,actBusy=false,lastId=0,histKey='',note=null;
@@ -474,7 +466,23 @@ input:disabled{opacity:.45}
   $('go').onclick=goClick;
   $('mute').onclick=function(){st.muted=!st.muted;$('mute').textContent=st.muted?'🔇':'🔊';if(st.muted)humStop();else{ctx();sfx.tap()}};
   bal();histRender();resize();
-  api('/api/auth').then(function(r){st.bal=r.balance;bal();showFair(r.fair);minesInit(r);chickenInit(r);authed=true;poll()}).catch(function(e){$('sub').textContent=errText(e)});
+  function showTerms(text){$('termstext').textContent=text||'';$('tcheck').checked=false;$('tyes').disabled=true;$('tmsg').textContent='';$('terms').hidden=false;authed=false}
+  function boot(){ // login; until the rules are accepted the server returns only the rules text
+    api('/api/auth').then(function(r){
+      if(r.terms){showTerms(r.text);return}
+      $('terms').hidden=true;st.bal=r.balance;bal();showFair(r.fair);minesInit(r);chickenInit(r);authed=true;poll();
+    }).catch(function(e){$('sub').textContent=errText(e)});
+  }
+  $('tcheck').onchange=function(){$('tyes').disabled=!$('tcheck').checked};
+  $('tyes').onclick=function(){
+    if(!$('tcheck').checked)return;$('tyes').disabled=true;
+    api('/api/terms/accept',{adult:true}).then(function(){boot()}).catch(function(e){$('tmsg').className='mmsg l';$('tmsg').textContent=errText(e);$('tyes').disabled=false});
+  };
+  $('tno').onclick=function(){
+    $('tmsg').className='mmsg l';$('tmsg').textContent='Без согласия доступ к игре закрыт.';
+    if(tg&&tg.close)setTimeout(function(){try{tg.close()}catch(e){}},1500);
+  };
+  boot();
   tick();pollLoop();
   /* ---------- MINES (server-side) ---------- */
   var GEM='<svg viewBox="0 0 64 64"><g stroke="#19f2ff" stroke-width="3" stroke-linejoin="round" fill="#0b4a5c"><path d="M18 8h28l14 18-28 32L4 26z"/><path d="M4 26h56M24 26l8 32 8-32M18 8l6 18M46 8l-6 18" fill="none" stroke-width="2"/></g></svg>';
@@ -676,14 +684,6 @@ input:disabled{opacity:.45}
       loadOps();$('padmin').hidden=!r.admin;if(r.admin)loadAdmin();
     }).catch(function(e){$('wdmsg').textContent=errText(e)});
   }
-  $('depgo').onclick=function(){
-    var a=Math.floor(+$('dep').value),m=$('depmsg');
-    if(!(a>=100)){m.textContent='Минимальная сумма пополнения — 100 ⭐';m.className='mmsg l';return}
-    $('depgo').disabled=true;
-    api('/api/deposit',{amount:a}).then(function(r){
-      $('dep').value='';m.textContent='Заявка отправлена администратору';m.className='mmsg w';
-    }).catch(function(e){m.textContent=e.message==='deposit_pending'?'У тебя уже есть заявка на рассмотрении':errText(e);m.className='mmsg l'}).finally(function(){$('depgo').disabled=false});
-  };
   $('wdgo').onclick=function(){if(tg&&tg.requestWriteAccess){try{tg.requestWriteAccess()}catch(e){}}
     var a=Math.floor(+$('wd').value),m=$('wdmsg');
     if(!(a>=50)){m.textContent='Минимум 50 ◆';m.className='mmsg l';return}
@@ -815,10 +815,6 @@ input:disabled{opacity:.45}
   TABS.forEach(function(t){$('tab-'+t).onclick=function(){showTab(t)}});
   mSetup();mBuild();
 })();
-</script>
-
-<script>
-(function(){var loader=document.getElementById('neon-loader');if(!loader)return;var start=Date.now();function hideLoader(){var wait=Math.max(0,650-(Date.now()-start));setTimeout(function(){loader.classList.add('done');setTimeout(function(){if(loader.parentNode)loader.parentNode.removeChild(loader)},650)},wait)}if(document.readyState==='complete')hideLoader();else window.addEventListener('load',hideLoader,{once:true});setTimeout(function(){if(loader&&loader.parentNode&&!loader.classList.contains('done'))hideLoader()},10000)})();
 </script>
 </body>
 </html>
