@@ -83,8 +83,16 @@ CREATE TABLE IF NOT EXISTS chicken(
   level TEXT NOT NULL, burn TEXT NOT NULL, step INTEGER NOT NULL DEFAULT 0, nonce INTEGER NOT NULL,
   status TEXT NOT NULL DEFAULT 'active', mult REAL, payout INTEGER);
 CREATE UNIQUE INDEX IF NOT EXISTS one_chicken ON chicken(tg_id) WHERE status='active';`);
+db.exec(`CREATE TABLE IF NOT EXISTS invoices(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER NOT NULL REFERENCES users(tg_id), provider_id INTEGER UNIQUE,
+  usdt REAL NOT NULL, coins INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', url TEXT, created_at INTEGER NOT NULL, paid_at INTEGER);`);
+// Automatic top-up through Crypto Pay (@CryptoBot). Testnet: CRYPTO_PAY_API=https://testnet-pay.crypt.bot/api
+const PAY_TOKEN = process.env.CRYPTO_PAY_TOKEN || '';
+const PAY_API = (process.env.CRYPTO_PAY_API || 'https://pay.crypt.bot/api').replace(/\/$/, '');
+const COINS_PER_USDT = Math.max(1, Math.floor(Number(process.env.COINS_PER_USDT)) || 100);
+const MIN_USDT = Math.max(0.1, Number(process.env.MIN_USDT) || 1), MAX_USDT = 5000;
 db.exec(`CREATE TABLE IF NOT EXISTS terms(tg_id INTEGER PRIMARY KEY, version INTEGER NOT NULL, ts INTEGER NOT NULL);`);
-const TERMS_VERSION = 2; // bump it to make everybody accept new rules again
+const TERMS_VERSION = 3; // bump it to make everybody accept new rules again
 const WEBAPP_URL = process.env.WEBAPP_URL || ''; // public URL of the game, used for the "Играть" button in the bot
 const TERMS_TEXT = `ПОЛЬЗОВАТЕЛЬСКОЕ СОГЛАШЕНИЕ И ПРАВИЛА · Neon Arcade
 
@@ -98,7 +106,7 @@ Neon Arcade — игровое приложение в Telegram (Crash, Mines, C
 Результат каждой игры определяется сервером случайно и не зависит от вашего устройства. Честность можно проверить: перед игрой публикуется хеш секретного ключа, а после игры сам ключ. Ставки окончательны. Максимальная ставка и максимальная выплата за один раунд ограничены, актуальные лимиты показаны в приложении. Любая игра связана с риском потерять ставку. Играйте только теми средствами, которые готовы потерять, и не пытайтесь отыграться любой ценой.
 
 4. Баланс, пополнение и вывод
-Пополнение и вывод выполняются вручную администратором. Заявки на вывод рассматриваются в течение 8 часов. Минимальная сумма вывода — ${MIN_WD} ◆. Администратор вправе запросить подтверждение данных и отклонить заявку при признаках нарушения правил.
+Пополнение возможно автоматически (криптовалюта USDT через CryptoBot, курс 1 USDT = ${COINS_PER_USDT} ◆) или по заявке через администратора; платёж в блокчейне необратим, проверяйте сумму перед оплатой. Выводы выполняет вручную администратор, заявки на вывод рассматриваются в течение 8 часов. Минимальная сумма вывода — ${MIN_WD} ◆. Администратор вправе запросить подтверждение данных и отклонить заявку при признаках нарушения правил.
 
 5. Запрещено
 Обман, использование уязвимостей, несколько аккаунтов, отмывание средств, оскорбления и попытки взлома. За нарушения аккаунт блокируется, а выигрыши, полученные нечестным путём, аннулируются.
@@ -439,6 +447,21 @@ const routes = {
     if (g.step < 1) throw new Error('bad_cell');
     return { result: 'win', step: g.step, ...endChicken(g, 'win', chMult(g.level, g.step)) };
   },
+  '/api/pay/create': async (u, b) => { // creates a CryptoBot invoice; coins arrive automatically after the payment
+    if (!PAY_TOKEN) throw new Error('bad_game');
+    const usdt = Math.round(Number(b.usdt) * 100) / 100;
+    if (!(usdt >= MIN_USDT && usdt <= MAX_USDT)) throw new Error('bad_amount');
+    if (db.prepare(`SELECT COUNT(*) n FROM invoices WHERE tg_id=? AND status='pending' AND created_at>?`).get(u.tg_id, Date.now() - 3600e3).n >= 3) throw new Error('dep_pending');
+    const coins = Math.floor(usdt * COINS_PER_USDT);
+    const local = db.prepare('INSERT INTO invoices(tg_id,usdt,coins,created_at) VALUES(?,?,?,?)').run(u.tg_id, usdt, coins, Date.now()).lastInsertRowid;
+    try {
+      const inv = await cryptoApi('createInvoice', { asset: 'USDT', amount: String(usdt), description: `Neon Arcade: ${coins} ◆`, payload: `u${u.tg_id}:i${local}`, expires_in: 3600, allow_comments: false, allow_anonymous: false });
+      const url = inv.bot_invoice_url || inv.pay_url;
+      db.prepare('UPDATE invoices SET provider_id=?, url=? WHERE id=?').run(inv.invoice_id, url, local);
+      return { id: local, url, usdt, coins };
+    } catch (e) { db.prepare(`UPDATE invoices SET status='failed' WHERE id=?`).run(local); console.error('createInvoice:', e.message); throw new Error('pay_failed'); }
+  },
+  '/api/pay/check': async (u) => { await checkInvoices(u.tg_id); return { balance: getUser(u.tg_id).balance, invoices: myInvoices(u.tg_id) }; },
   '/api/deposit': (u, b) => { // a request only: the admin confirms and credits the coins by hand
     const amount = b.amount;
     if (!Number.isSafeInteger(amount) || amount < MIN_DEP || amount > 1e7) throw new Error('bad_amount');
@@ -478,7 +501,7 @@ const routes = {
     const ch = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) bet, COALESCE(SUM(payout),0) won, COALESCE(MAX(CASE WHEN status='win' THEN mult END),0) best FROM chicken WHERE tg_id=? AND status!='active'`).get(u.tg_id);
     const m = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) bet, COALESCE(SUM(payout),0) won, COALESCE(MAX(CASE WHEN status='win' THEN mult END),0) best FROM mines WHERE tg_id=? AND status!='active'`).get(u.tg_id);
     const w = db.prepare('SELECT id, amount, status, created_at, gift FROM withdrawals WHERE tg_id=? ORDER BY id DESC LIMIT 10').all(u.tg_id).map((r) => ({ ...r, gift_name: giftName(r.gift) }));
-    return { id: x.tg_id, name: x.first_name, username: x.username, since: x.created_at, balance: x.balance, crash: { ...c }, mines: { ...m }, chicken: { ...ch }, withdrawals: w, contact: CONTACT, min_dep: MIN_DEP, ref: refInfo(u.tg_id),
+    return { id: x.tg_id, name: x.first_name, username: x.username, since: x.created_at, balance: x.balance, crash: { ...c }, mines: { ...m }, chicken: { ...ch }, withdrawals: w, contact: CONTACT, min_dep: MIN_DEP, ref: refInfo(u.tg_id), pay: { enabled: !!PAY_TOKEN, min: MIN_USDT, rate: COINS_PER_USDT }, invoices: myInvoices(u.tg_id),
       deposits: db.prepare('SELECT id, amount, credited, status, created_at FROM deposits WHERE tg_id=? ORDER BY id DESC LIMIT 10').all(u.tg_id).map((r) => ({ ...r })), admin: ADMIN_IDS.has(x.tg_id) };
   },
   '/api/withdraw': (u, b) => { // request only: funds are held until the request is reviewed
@@ -516,7 +539,7 @@ const routes = {
     return {
       period: b.period || 'all', bets, wins, profit: bets - wins, rtp: bets ? Math.round((wins / bets) * 1000) / 10 : 0,
       players: db.prepare(`SELECT COUNT(DISTINCT tg_id) n FROM ledger WHERE ts>=? AND reason IN ('crash_bet','mines_bet','chicken_bet','bet')`).get(since).n,
-      deposits: sum(['deposit']), withdrawals: wd.s, withdrawals_n: wd.n, gifts_out: gw.s, gifts_out_n: gw.n,
+      deposits: sum(['deposit', 'crypto_deposit']), withdrawals: wd.s, withdrawals_n: wd.n, gifts_out: gw.s, gifts_out_n: gw.n,
       gifts_bought: -sum(['gift_buy']), referral: sum(['referral']),
       balances: { ...db.prepare('SELECT COALESCE(SUM(balance),0) s, COUNT(*) n FROM users').get() },
       pending: { wd: db.prepare(`SELECT COUNT(*) n FROM withdrawals WHERE status='pending'`).get().n, dep: db.prepare(`SELECT COUNT(*) n FROM deposits WHERE status='pending'`).get().n },
@@ -557,8 +580,8 @@ const routes = {
     return res;
   },
   '/api/history': (u) => { // balance operations visible to the player (no individual bets)
-    const L = { deposit: 'Пополнение', referral: 'Реферальный бонус', signup: 'Стартовый баланс', admin_adjust: 'Начисление/списание админом', withdraw_hold: 'Заявка на вывод', withdraw_refund: 'Возврат по заявке', gift_buy: 'Покупка подарка', gift_sell: 'Продажа подарка' };
-    return db.prepare(`SELECT delta, reason, ts FROM ledger WHERE tg_id=? AND reason IN ('signup','deposit','referral','admin_adjust','withdraw_hold','withdraw_refund','gift_buy','gift_sell') ORDER BY id DESC LIMIT 20`)
+    const L = { deposit: 'Пополнение', crypto_deposit: 'Пополнение (крипто)', referral: 'Реферальный бонус', signup: 'Стартовый баланс', admin_adjust: 'Начисление/списание админом', withdraw_hold: 'Заявка на вывод', withdraw_refund: 'Возврат по заявке', gift_buy: 'Покупка подарка', gift_sell: 'Продажа подарка' };
+    return db.prepare(`SELECT delta, reason, ts FROM ledger WHERE tg_id=? AND reason IN ('signup','deposit','crypto_deposit','referral','admin_adjust','withdraw_hold','withdraw_refund','gift_buy','gift_sell') ORDER BY id DESC LIMIT 20`)
       .all(u.tg_id).map((r) => ({ delta: r.delta, label: L[r.reason], ts: r.ts }));
   },
   '/api/gifts': (u) => ({
@@ -616,7 +639,7 @@ const routes = {
     return { revealed: old, fair: fair(getUser(x.tg_id)) };
   },
 };
-const KNOWN = new Set(['bad_amount', 'bad_auto', 'bad_game', 'bad_cell', 'no_game', 'forbidden', 'wd_pending', 'inv_full', 'no_balance', 'round_active', 'late', 'terms', 'dep_pending', 'bad_json', 'big']);
+const KNOWN = new Set(['bad_amount', 'bad_auto', 'bad_game', 'bad_cell', 'no_game', 'forbidden', 'wd_pending', 'inv_full', 'no_balance', 'round_active', 'late', 'terms', 'pay_failed', 'dep_pending', 'bad_json', 'big']);
 
 /* ---------- admin security + Telegram bot notifications ---------- */
 const audit = (admin, action, target, detail = '') =>
@@ -654,6 +677,55 @@ function notifyWithdraw(wid, x, amount, before) { // the bot sends the admin the
   for (const id of ADMIN_IDS) sendSafe(id, text, { reply_markup: kb });
   sendSafe(x.tg_id, `✅ Заявка #${wid} на ${num(amount)} ◆ принята.\nВывод делается в течение 8 часов.`);
 }
+async function cryptoApi(method, params) { // server-to-server only, the token never leaves the server
+  const r = await fetch(`${PAY_API}/${method}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'Crypto-Pay-API-Token': PAY_TOKEN }, body: JSON.stringify(params), signal: AbortSignal.timeout(15000),
+  });
+  const j = await r.json();
+  if (!j.ok) throw new Error(`${method}: ${j.error?.name || j.error || r.status}`);
+  return j.result;
+}
+function creditInvoice(inv) { // idempotent: only the pending -> paid transition credits the coins, so a double check never pays twice
+  const out = tx(() => {
+    const d = db.prepare(`UPDATE invoices SET status='paid', paid_at=? WHERE id=? AND status='pending'`).run(Date.now(), inv.id);
+    if (d.changes !== 1) return null;
+    db.prepare('UPDATE users SET balance=balance+? WHERE tg_id=?').run(inv.coins, inv.tg_id);
+    led(inv.tg_id, inv.coins, 'crypto_deposit', inv.id);
+    let bonus = 0, refTo = null;
+    const rf = REF_PERCENT ? db.prepare('SELECT referrer FROM referrals WHERE referred=?').get(inv.tg_id) : null;
+    if (rf) {
+      bonus = Math.floor((inv.coins * REF_PERCENT) / 100);
+      if (bonus > 0) { db.prepare('UPDATE users SET balance=balance+? WHERE tg_id=?').run(bonus, rf.referrer); led(rf.referrer, bonus, 'referral', inv.id); refTo = rf.referrer; }
+    }
+    return { bonus, refTo, balance: getUser(inv.tg_id).balance };
+  });
+  if (!out) return;
+  sendSafe(inv.tg_id, `💰 Оплата получена: ${num(inv.usdt)} USDT → +${num(inv.coins)} ◆\nБаланс: ${num(out.balance)} ◆`);
+  if (out.bonus > 0) sendSafe(out.refTo, `🎁 Реферальный бонус +${num(out.bonus)} ◆: ваш друг пополнил счёт.`);
+  for (const id of ADMIN_IDS) sendSafe(id, `💰 Автопополнение · 🆔 ${inv.tg_id} · ${num(inv.usdt)} USDT → ${num(inv.coins)} ◆`);
+}
+let checking = false;
+async function checkInvoices(onlyUser) { // asks Crypto Pay which pending invoices are paid; the amount comes from the provider, never from the client
+  if (!PAY_TOKEN || checking) return;
+  checking = true;
+  try {
+    const rows = db.prepare(`SELECT * FROM invoices WHERE status='pending' AND provider_id IS NOT NULL${onlyUser ? ' AND tg_id=?' : ''} ORDER BY id DESC LIMIT 100`).all(...(onlyUser ? [onlyUser] : []));
+    if (!rows.length) return;
+    const res = await cryptoApi('getInvoices', { invoice_ids: rows.map((r) => r.provider_id).join(',') });
+    for (const it of Array.isArray(res) ? res : res.items || []) {
+      const inv = rows.find((r) => r.provider_id === Number(it.invoice_id));
+      if (!inv) continue;
+      if (it.status === 'paid') {
+        if (it.asset === 'USDT' && Number(it.amount) + 1e-9 >= inv.usdt) creditInvoice(inv);
+        else { // wrong asset/amount: do not credit, tell the admin
+          db.prepare(`UPDATE invoices SET status='mismatch' WHERE id=? AND status='pending'`).run(inv.id);
+          for (const id of ADMIN_IDS) sendSafe(id, `⚠️ Счёт #${inv.id} (🆔 ${inv.tg_id}) оплачен, но сумма или валюта не совпали: ждали ${inv.usdt} USDT, пришло ${it.amount} ${it.asset}. Монеты не начислены.`);
+        }
+      } else if (it.status === 'expired') db.prepare(`UPDATE invoices SET status='expired' WHERE id=? AND status='pending'`).run(inv.id);
+    }
+  } catch (e) { console.error('pay check:', e.message); } finally { checking = false; }
+}
+const myInvoices = (id) => db.prepare('SELECT id, usdt, coins, status, created_at FROM invoices WHERE tg_id=? ORDER BY id DESC LIMIT 5').all(id).map((r) => ({ ...r }));
 function notifyDeposit(did, x, amount) { // the bot sends the admin the player's data + confirm/reject buttons
   const s = stats(x.tg_id);
   const text = `💰 Заявка на пополнение #${did}\n\n🆔 ${x.tg_id}${x.username ? ` (@${x.username})` : ''}${x.first_name ? ` · ${x.first_name}` : ''}\n`
@@ -795,7 +867,7 @@ const srv = http.createServer(async (req, res) => {
       if (req.url === '/api/auth') return send(res, 200, { terms: true, version: TERMS_VERSION, text: TERMS_TEXT });
       if (req.url !== '/api/terms/accept') return send(res, 400, { error: 'terms' });
     }
-    send(res, 200, fn(ensureUser(tgUser), body, tgUser));
+    send(res, 200, await fn(ensureUser(tgUser), body, tgUser));
   } catch (e) {
     if (!KNOWN.has(e.message)) console.error(e);
     send(res, 400, { error: KNOWN.has(e.message) ? e.message : 'error' });
@@ -808,3 +880,4 @@ process.on('unhandledRejection', (e) => console.error('unhandledRejection:', e?.
 process.on('uncaughtException', (e) => console.error('uncaughtException:', e?.message ?? e));
 pollBot(); // the bot answers /start for everybody, so it always runs
 tgCall('getMe', {}).then((r) => { BOT_USERNAME = r.username || ''; }).catch((e) => console.error('getMe:', e.message)); // needed for referral links
+if (PAY_TOKEN) setInterval(() => checkInvoices(), 10000); // automatic top-up: look for paid invoices every 10 s

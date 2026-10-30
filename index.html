@@ -113,7 +113,7 @@ input:disabled{opacity:.45}
 </div>
 <div class="app">
   <div class="top">
-    <h1>NEON ARCADE <small style="font-size:11px;color:var(--dim);text-shadow:none">v13</small></h1>
+    <h1>NEON ARCADE <small style="font-size:11px;color:var(--dim);text-shadow:none">v14</small></h1>
     <div style="display:flex;align-items:center"><div class="bal" id="balbtn" style="cursor:pointer"><span id="bal">0</span> ◆ <b style="color:var(--lime)">＋</b></div><button class="mute on" id="mus" aria-label="Музыка">🎵</button><button class="mute" id="mute" aria-label="Звук">🔊</button></div>
   </div>
   <nav class="tabs"><button id="tab-crash" class="on">🚀 Crash</button><button id="tab-mines">💎 Mines</button><button id="tab-chicken">🐔 Chicken</button><button id="tab-up">🎁 Апгрейд</button><button id="tab-top">🏆 Топ</button><button id="tab-profile">👤 Профиль</button></nav>
@@ -197,6 +197,15 @@ input:disabled{opacity:.45}
     <div class="panel"><div class="lbl">Профиль</div><div id="pinfo"></div></div>
     <div class="panel"><div class="lbl">Статистика</div><div id="pstats"></div></div>
     <div class="panel">
+      <div id="payauto" hidden>
+        <div class="lbl">Автоматическое пополнение · USDT через CryptoBot</div>
+        <input id="pyusdt" type="number" inputmode="decimal" placeholder="Сумма в USDT" style="margin-bottom:8px">
+        <div class="lbl" id="pyprev" style="text-align:center">—</div>
+        <button class="go" id="pygo">Оплатить через CryptoBot</button>
+        <div class="mmsg" id="pymsg"></div>
+        <div class="lbl">Мои платежи</div><div id="pylist"></div>
+        <div style="border-top:1px solid #2b1d4d;margin:14px 0"></div>
+      </div>
       <div class="lbl" id="dplabel">Пополнение</div>
       <input id="dp" type="number" inputmode="numeric" min="50" placeholder="Сумма" style="margin-bottom:8px">
       <button class="go" id="dpgo">Подать заявку на пополнение</button>
@@ -395,7 +404,7 @@ input:disabled{opacity:.45}
   }
   function errText(e){
     var m=e&&e.message;
-    return m==='unauthorized'?((tg&&tg.initData)?'Ошибка входа: проверь BOT_TOKEN на сервере':'Открой игру через Telegram'):m==='terms'?'Нужно принять правила':m==='no_balance'?'Не хватает баланса':m==='round_active'?'Ставка уже есть':m==='late'?'Поздно: ставки закрыты или раунд закончился':m==='slow_down'?'Слишком часто':m==='dep_pending'?'Заявка на пополнение уже есть, ждём подтверждения':m==='wd_pending'?'Предыдущая заявка ещё на рассмотрении':m==='bad_amount'?'Неверная сумма или превышен лимит':m==='forbidden'?'Нет доступа (админ-сессия старше часа: закрой и открой приложение)':m==='no_game'?'Не найдено':m==='inv_full'?'Инвентарь полон':'Ошибка связи ('+(m||'?')+')';
+    return m==='unauthorized'?((tg&&tg.initData)?'Ошибка входа: проверь BOT_TOKEN на сервере':'Открой игру через Telegram'):m==='terms'?'Нужно принять правила':m==='no_balance'?'Не хватает баланса':m==='round_active'?'Ставка уже есть':m==='late'?'Поздно: ставки закрыты или раунд закончился':m==='slow_down'?'Слишком часто':m==='pay_failed'?'Не удалось создать счёт, попробуй позже':m==='dep_pending'?'Заявка на пополнение уже есть, ждём подтверждения':m==='wd_pending'?'Предыдущая заявка ещё на рассмотрении':m==='bad_amount'?'Неверная сумма или превышен лимит':m==='forbidden'?'Нет доступа (админ-сессия старше часа: закрой и открой приложение)':m==='no_game'?'Не найдено':m==='inv_full'?'Инвентарь полон':'Ошибка связи ('+(m||'?')+')';
   }
   function showFair(f){if(f){var t='Provably fair · hash '+f.hash.slice(0,16)+'… · nonce '+f.nonce;$('fair2').textContent=t;$('fair3').textContent=t}}
   var LIM={maxBet:10000,maxPayout:100000};
@@ -710,7 +719,7 @@ input:disabled{opacity:.45}
         var b=document.createElement('span');b.className='st '+w.status;b.textContent=WS[w.status]||w.status;
         d.appendChild(a);d.appendChild(b);l.appendChild(d);
       });
-      loadOps();loadDeps(r);loadRef(r);$('padmin').hidden=!r.admin;if(r.admin){loadAdmin();loadAdminDeps();loadStats()}
+      loadOps();loadDeps(r);loadRef(r);loadPay(r);$('padmin').hidden=!r.admin;if(r.admin){loadAdmin();loadAdminDeps();loadStats()}
     }).catch(function(e){$('wdmsg').textContent=errText(e)});
   }
   $('wdgo').onclick=function(){if(tg&&tg.requestWriteAccess){try{tg.requestWriteAccess()}catch(e){}}
@@ -721,8 +730,46 @@ input:disabled{opacity:.45}
     }).catch(function(e){m.textContent=errText(e);m.className='mmsg l'});
   };
   var DS={pending:'На рассмотрении',paid:'Начислено',rejected:'Отклонено'},minDep=50;
+  var payTimer=0,payRate=100,payMin=1,PYS={pending:['На оплате','pending'],paid:['Зачислено','paid'],expired:['Истёк','rejected'],failed:['Ошибка','rejected'],mismatch:['Сумма не совпала — напиши админу','rejected']};
+  function renderInvoices(list){
+    var l=$('pylist');l.innerHTML='';
+    if(!(list||[]).length){var e=document.createElement('div');e.className='lbl';e.textContent='Платежей пока нет';l.appendChild(e)}
+    (list||[]).forEach(function(w){
+      var d=document.createElement('div');d.className='kv';
+      var a=document.createElement('span');a.textContent='#'+w.id+' · '+w.usdt+' USDT → '+money(w.coins)+' ◆ · '+fdate(w.created_at);
+      var s=PYS[w.status]||[w.status,'rejected'];var b=document.createElement('span');b.className='st '+s[1];b.textContent=s[0];
+      d.appendChild(a);d.appendChild(b);l.appendChild(d);
+    });
+  }
+  function startPayWatch(){ // after paying in CryptoBot: ask the server every 5 s until the coins arrive
+    clearInterval(payTimer);var n=0;
+    payTimer=setInterval(function(){
+      if(++n>60||$('t-profile').hidden||document.hidden){clearInterval(payTimer);return}
+      api('/api/pay/check').then(function(r){
+        st.bal=r.balance;bal();renderInvoices(r.invoices);
+        if(!r.invoices.some(function(w){return w.status==='pending'})){clearInterval(payTimer);sfx.cash();buzz('good');loadProfile()}
+      }).catch(function(){});
+    },5000);
+  }
+  function loadPay(r){
+    var p=r.pay||{};$('payauto').hidden=!p.enabled;if(!p.enabled)return;
+    payRate=p.rate;payMin=p.min;
+    var upd=function(){var v=parseFloat($('pyusdt').value);$('pyprev').textContent=(v>0?'= '+money(Math.floor(v*payRate))+' ◆ · ':'')+'1 USDT = '+payRate+' ◆, минимум '+payMin+' USDT'};
+    $('pyusdt').oninput=upd;upd();renderInvoices(r.invoices);
+    if((r.invoices||[]).some(function(w){return w.status==='pending'}))startPayWatch();
+  }
+  $('pygo').onclick=function(){
+    var v=parseFloat($('pyusdt').value),m=$('pymsg');
+    if(!(v>=payMin)){m.className='mmsg l';m.textContent='Минимум '+payMin+' USDT';return}
+    $('pygo').disabled=true;
+    api('/api/pay/create',{usdt:v}).then(function(r){
+      m.className='mmsg w';m.textContent='Откроется CryptoBot. После оплаты монеты придут сами.';
+      if(tg&&tg.openTelegramLink)tg.openTelegramLink(r.url);else window.open(r.url,'_blank');
+      loadProfile();startPayWatch();
+    }).catch(function(e){m.className='mmsg l';m.textContent=errText(e)}).then(function(){$('pygo').disabled=false});
+  };
   function loadDeps(r){
-    minDep=r.min_dep||50;$('dplabel').textContent='Пополнение (минимум '+minDep+' ◆)';
+    minDep=r.min_dep||50;$('dplabel').textContent='Пополнение по заявке через админа (минимум '+minDep+' ◆)';
     var l=$('dplist');l.innerHTML='';
     if(!(r.deposits||[]).length){var e=document.createElement('div');e.className='lbl';e.textContent='Заявок пока нет';l.appendChild(e)}
     (r.deposits||[]).forEach(function(w){
