@@ -113,8 +113,8 @@ input:disabled{opacity:.45}
 </div>
 <div class="app">
   <div class="top">
-    <h1>NEON ARCADE <small style="font-size:11px;color:var(--dim);text-shadow:none">v11</small></h1>
-    <div style="display:flex;align-items:center"><div class="bal"><span id="bal">0</span> ◆</div><button class="mute on" id="mus" aria-label="Музыка">🎵</button><button class="mute" id="mute" aria-label="Звук">🔊</button></div>
+    <h1>NEON ARCADE <small style="font-size:11px;color:var(--dim);text-shadow:none">v12</small></h1>
+    <div style="display:flex;align-items:center"><div class="bal" id="balbtn" style="cursor:pointer"><span id="bal">0</span> ◆ <b style="color:var(--lime)">＋</b></div><button class="mute on" id="mus" aria-label="Музыка">🎵</button><button class="mute" id="mute" aria-label="Звук">🔊</button></div>
   </div>
   <nav class="tabs"><button id="tab-crash" class="on">🚀 Crash</button><button id="tab-mines">💎 Mines</button><button id="tab-chicken">🐔 Chicken</button><button id="tab-up">🎁 Апгрейд</button><button id="tab-top">🏆 Топ</button><button id="tab-profile">👤 Профиль</button></nav>
   <section id="t-crash">
@@ -194,6 +194,15 @@ input:disabled{opacity:.45}
     <div class="panel"><div class="lbl">Профиль</div><div id="pinfo"></div></div>
     <div class="panel"><div class="lbl">Статистика</div><div id="pstats"></div></div>
     <div class="panel">
+      <div class="lbl" id="dplabel">Пополнение</div>
+      <input id="dp" type="number" inputmode="numeric" min="50" placeholder="Сумма" style="margin-bottom:8px">
+      <button class="go" id="dpgo">Подать заявку на пополнение</button>
+      <div class="mmsg" id="dpmsg"></div>
+      <div class="lbl" id="dpnote" style="text-align:center">Для пополнения напиши админу: он подтвердит заявку и начислит монеты.</div>
+      <button class="mc" id="dpwrite" hidden style="width:100%;margin:8px 0"></button>
+      <div class="lbl">Мои заявки на пополнение</div><div id="dplist"></div>
+    </div>
+    <div class="panel">
       <div class="lbl">Вывод средств (минимум 50 ◆)</div>
       <input id="wd" type="number" inputmode="numeric" min="50" placeholder="Сумма" style="margin-bottom:8px">
       <button class="go" id="wdgo">Подать заявку на вывод</button>
@@ -204,6 +213,7 @@ input:disabled{opacity:.45}
     <div class="panel"><div class="lbl">Операции по счёту</div><div id="ophist"></div></div>
     <div class="panel" id="padmin" hidden>
       <div class="lbl">Админ: заявки на рассмотрении</div><div id="adlist"></div>
+      <div class="lbl" style="margin-top:14px">Заявки на пополнение</div><div id="addeps"></div>
       <div class="lbl" style="margin-top:14px">Изменить счёт игрока</div>
       <input id="adid" type="number" inputmode="numeric" placeholder="Telegram ID игрока" style="margin-bottom:8px">
       <input id="adamt" type="number" inputmode="numeric" placeholder="Сумма (минус = списать)" style="margin-bottom:8px">
@@ -369,7 +379,7 @@ input:disabled{opacity:.45}
   }
   function errText(e){
     var m=e&&e.message;
-    return m==='unauthorized'?((tg&&tg.initData)?'Ошибка входа: проверь BOT_TOKEN на сервере':'Открой игру через Telegram'):m==='terms'?'Нужно принять правила':m==='no_balance'?'Не хватает баланса':m==='round_active'?'Ставка уже есть':m==='late'?'Поздно: ставки закрыты или раунд закончился':m==='slow_down'?'Слишком часто':m==='wd_pending'?'Предыдущая заявка ещё на рассмотрении':m==='bad_amount'?'Неверная сумма':m==='forbidden'?'Нет доступа (админ-сессия старше часа: закрой и открой приложение)':m==='no_game'?'Не найдено':m==='inv_full'?'Инвентарь полон':'Ошибка связи ('+(m||'?')+')';
+    return m==='unauthorized'?((tg&&tg.initData)?'Ошибка входа: проверь BOT_TOKEN на сервере':'Открой игру через Telegram'):m==='terms'?'Нужно принять правила':m==='no_balance'?'Не хватает баланса':m==='round_active'?'Ставка уже есть':m==='late'?'Поздно: ставки закрыты или раунд закончился':m==='slow_down'?'Слишком часто':m==='dep_pending'?'Заявка на пополнение уже есть, ждём подтверждения':m==='wd_pending'?'Предыдущая заявка ещё на рассмотрении':m==='bad_amount'?'Неверная сумма':m==='forbidden'?'Нет доступа (админ-сессия старше часа: закрой и открой приложение)':m==='no_game'?'Не найдено':m==='inv_full'?'Инвентарь полон':'Ошибка связи ('+(m||'?')+')';
   }
   function showFair(f){if(f){var t='Provably fair · hash '+f.hash.slice(0,16)+'… · nonce '+f.nonce;$('fair2').textContent=t;$('fair3').textContent=t}}
   var snap=null,off=0,authed=false,pollBusy=false,actBusy=false,lastId=0,histKey='',note=null;
@@ -662,7 +672,7 @@ input:disabled{opacity:.45}
   function fdate(ts){var d=new Date(ts);return d.toLocaleDateString('ru-RU')+' '+d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})}
   var WS={pending:'На рассмотрении',paid:'Выплачено',rejected:'Отклонено'};
   function loadProfile(){
-    api('/api/profile').then(function(r){
+    api('/api/profile').then(function(r){st.bal=r.balance;bal();
       var p=$('pinfo');p.innerHTML='';
       kv(p,'Имя',r.name||'—');kv(p,'Username',r.username?'@'+r.username:'—');kv(p,'Telegram ID',String(r.id));
       kv(p,'В игре с',fdate(r.since));kv(p,'Баланс',money(r.balance)+' ◆');
@@ -681,7 +691,7 @@ input:disabled{opacity:.45}
         var b=document.createElement('span');b.className='st '+w.status;b.textContent=WS[w.status]||w.status;
         d.appendChild(a);d.appendChild(b);l.appendChild(d);
       });
-      loadOps();$('padmin').hidden=!r.admin;if(r.admin)loadAdmin();
+      loadOps();loadDeps(r);$('padmin').hidden=!r.admin;if(r.admin){loadAdmin();loadAdminDeps()}
     }).catch(function(e){$('wdmsg').textContent=errText(e)});
   }
   $('wdgo').onclick=function(){if(tg&&tg.requestWriteAccess){try{tg.requestWriteAccess()}catch(e){}}
@@ -691,6 +701,49 @@ input:disabled{opacity:.45}
       st.bal=r.balance;bal();$('wd').value='';m.textContent='Заявка отправлена';m.className='mmsg w';loadProfile();
     }).catch(function(e){m.textContent=errText(e);m.className='mmsg l'});
   };
+  var DS={pending:'На рассмотрении',paid:'Начислено',rejected:'Отклонено'},minDep=50;
+  function loadDeps(r){
+    minDep=r.min_dep||50;$('dplabel').textContent='Пополнение (минимум '+minDep+' ◆)';
+    var l=$('dplist');l.innerHTML='';
+    if(!(r.deposits||[]).length){var e=document.createElement('div');e.className='lbl';e.textContent='Заявок пока нет';l.appendChild(e)}
+    (r.deposits||[]).forEach(function(w){
+      var d=document.createElement('div');d.className='kv';
+      var a=document.createElement('span');a.textContent='#'+w.id+' · '+money(w.status==='paid'?w.credited:w.amount)+' ◆ · '+fdate(w.created_at);
+      var b=document.createElement('span');b.className='st '+w.status;b.textContent=DS[w.status]||w.status;
+      d.appendChild(a);d.appendChild(b);l.appendChild(d);
+    });
+    var wb=$('dpwrite');
+    if(r.contact){wb.hidden=false;wb.textContent='✉️ Написать админу @'+r.contact;wb.onclick=function(){var u='https://t.me/'+r.contact;if(tg&&tg.openTelegramLink)tg.openTelegramLink(u);else window.open(u,'_blank')}}
+    else wb.hidden=true;
+  }
+  $('dpgo').onclick=function(){
+    var a=Math.floor(+$('dp').value),m=$('dpmsg');
+    if(!(a>=minDep)){m.textContent='Минимум '+minDep+' ◆';m.className='mmsg l';return}
+    api('/api/deposit',{amount:a}).then(function(){
+      $('dp').value='';m.textContent='Заявка отправлена. Напиши админу, чтобы он пополнил счёт.';m.className='mmsg w';sfx.tap();loadProfile();
+    }).catch(function(e){m.textContent=errText(e);m.className='mmsg l'});
+  };
+  function loadAdminDeps(){
+    api('/api/admin/deposits').then(function(rows){
+      var l=$('addeps');l.innerHTML='';
+      if(!rows.length){l.textContent='Нет заявок на пополнение';return}
+      rows.forEach(function(w){
+        var d=document.createElement('div');d.className='kv';d.style.flexWrap='wrap';d.style.gap='6px';
+        var a=document.createElement('span');a.textContent='#'+w.id+' '+(w.first_name||'')+(w.username?' @'+w.username:'')+' · ID '+w.tg_id+' · хочет '+money(w.amount)+' ◆ · на счету '+money(w.balance)+' ◆ · игр '+w.games+' (ставок на '+money(w.wagered)+' ◆)';
+        d.appendChild(a);
+        var inp=document.createElement('input');inp.type='number';inp.value=w.amount;inp.style.cssText='width:110px;margin:0;padding:8px;font-size:15px';d.appendChild(inp);
+        [['paid','Начислить'],['rejected','Отклонить']].forEach(function(x){
+          var b=document.createElement('button');b.className='mc';b.style.flex='none';b.textContent=x[1];
+          b.onclick=function(){
+            api('/api/admin/deposit_set',{id:w.id,status:x[0],amount:x[0]==='paid'?Math.floor(+inp.value):undefined}).then(loadAdminDeps).catch(function(e){$('admsg').className='mmsg l';$('admsg').textContent=errText(e)});
+          };
+          d.appendChild(b);
+        });
+        l.appendChild(d);
+      });
+    }).catch(function(){});
+  }
+  $('balbtn').onclick=function(){showTab('profile')};
   function loadOps(){
     api('/api/history').then(function(rows){
       var l=$('ophist');l.innerHTML='';

@@ -113,6 +113,11 @@ Neon Arcade — игровое приложение в Telegram (Crash, Mines, C
 Нажимая «Согласен», вы подтверждаете, что вам исполнилось 18 лет, вы действуете от своего имени и принимаете это соглашение.`;
 const hasAgreed = (id) => !!db.prepare('SELECT 1 FROM terms WHERE tg_id=? AND version>=?').get(id, TERMS_VERSION);
 const saveAgreement = (id) => db.prepare('INSERT INTO terms(tg_id,version,ts) VALUES(?,?,?) ON CONFLICT(tg_id) DO UPDATE SET version=excluded.version, ts=excluded.ts').run(id, TERMS_VERSION, Date.now());
+db.exec(`CREATE TABLE IF NOT EXISTS deposits(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER NOT NULL REFERENCES users(tg_id), amount INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending', credited INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);`);
+const MIN_DEP = Math.max(1, Math.floor(Number(process.env.MIN_DEPOSIT)) || 50);
+const CONTACT = /^@?[A-Za-z0-9_]{5,32}$/.test(process.env.ADMIN_CONTACT || '') ? process.env.ADMIN_CONTACT.replace(/^@/, '') : ''; // admin's @username shown to players
 const BET_MS = 5000, END_MS = 3000; // betting window (5 s) and pause after the crash
 const CH_LEVELS = { easy: 0.92, mid: 0.85, hard: 0.75 }, CH_STEPS = 20; // chance to survive one step
 
@@ -412,6 +417,28 @@ const routes = {
     if (g.step < 1) throw new Error('bad_cell');
     return { result: 'win', step: g.step, ...endChicken(g, 'win', chMult(g.level, g.step)) };
   },
+  '/api/deposit': (u, b) => { // a request only: the admin confirms and credits the coins by hand
+    const amount = b.amount;
+    if (!Number.isSafeInteger(amount) || amount < MIN_DEP || amount > 1e7) throw new Error('bad_amount');
+    return tx(() => {
+      const x = getUser(u.tg_id);
+      if (db.prepare(`SELECT 1 FROM deposits WHERE tg_id=? AND status='pending'`).get(x.tg_id)) throw new Error('dep_pending');
+      const id = db.prepare('INSERT INTO deposits(tg_id,amount,created_at,updated_at) VALUES(?,?,?,?)').run(x.tg_id, amount, Date.now(), Date.now()).lastInsertRowid;
+      try { notifyDeposit(id, x, amount); } catch (e) { console.error('notify:', e.message); }
+      return { id, contact: CONTACT };
+    });
+  },
+  '/api/admin/deposits': (u, b, t) => {
+    assertAdmin(u, t, 'deposits');
+    return db.prepare(`SELECT d.id, d.amount, d.tg_id, x.first_name, x.username, x.balance FROM deposits d JOIN users x ON x.tg_id=d.tg_id WHERE d.status='pending' ORDER BY d.id LIMIT 50`)
+      .all().map((r) => ({ ...r, ...stats(r.tg_id) }));
+  },
+  '/api/admin/deposit_set': (u, b, t) => { // amount (optional) = how much to credit, may differ from the request
+    assertAdmin(u, t, 'deposit_set');
+    if (!['paid', 'rejected'].includes(b.status) || !Number.isInteger(b.id)) throw new Error('bad_game');
+    const r = reviewDeposit(b.id, b.status, u.tg_id, b.amount == null ? undefined : b.amount);
+    return { ok: true, credited: r.credited, balance: r.balance };
+  },
   '/api/terms/accept': (u, b) => { // the only route (besides auth) that works before the rules are accepted
     if (b.adult !== true) throw new Error('bad_game');
     saveAgreement(u.tg_id);
@@ -429,7 +456,8 @@ const routes = {
     const ch = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) bet, COALESCE(SUM(payout),0) won, COALESCE(MAX(CASE WHEN status='win' THEN mult END),0) best FROM chicken WHERE tg_id=? AND status!='active'`).get(u.tg_id);
     const m = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) bet, COALESCE(SUM(payout),0) won, COALESCE(MAX(CASE WHEN status='win' THEN mult END),0) best FROM mines WHERE tg_id=? AND status!='active'`).get(u.tg_id);
     const w = db.prepare('SELECT id, amount, status, created_at, gift FROM withdrawals WHERE tg_id=? ORDER BY id DESC LIMIT 10').all(u.tg_id).map((r) => ({ ...r, gift_name: giftName(r.gift) }));
-    return { id: x.tg_id, name: x.first_name, username: x.username, since: x.created_at, balance: x.balance, crash: { ...c }, mines: { ...m }, chicken: { ...ch }, withdrawals: w, admin: ADMIN_IDS.has(x.tg_id) };
+    return { id: x.tg_id, name: x.first_name, username: x.username, since: x.created_at, balance: x.balance, crash: { ...c }, mines: { ...m }, chicken: { ...ch }, withdrawals: w, contact: CONTACT, min_dep: MIN_DEP,
+      deposits: db.prepare('SELECT id, amount, credited, status, created_at FROM deposits WHERE tg_id=? ORDER BY id DESC LIMIT 10').all(u.tg_id).map((r) => ({ ...r })), admin: ADMIN_IDS.has(x.tg_id) };
   },
   '/api/withdraw': (u, b) => { // request only: funds are held until the request is reviewed
     const amount = b.amount;
@@ -479,8 +507,8 @@ const routes = {
     return res;
   },
   '/api/history': (u) => { // balance operations visible to the player (no individual bets)
-    const L = { signup: 'Стартовый баланс', admin_adjust: 'Начисление/списание админом', withdraw_hold: 'Заявка на вывод', withdraw_refund: 'Возврат по заявке', gift_buy: 'Покупка подарка', gift_sell: 'Продажа подарка' };
-    return db.prepare(`SELECT delta, reason, ts FROM ledger WHERE tg_id=? AND reason IN ('signup','admin_adjust','withdraw_hold','withdraw_refund','gift_buy','gift_sell') ORDER BY id DESC LIMIT 20`)
+    const L = { deposit: 'Пополнение', signup: 'Стартовый баланс', admin_adjust: 'Начисление/списание админом', withdraw_hold: 'Заявка на вывод', withdraw_refund: 'Возврат по заявке', gift_buy: 'Покупка подарка', gift_sell: 'Продажа подарка' };
+    return db.prepare(`SELECT delta, reason, ts FROM ledger WHERE tg_id=? AND reason IN ('signup','deposit','admin_adjust','withdraw_hold','withdraw_refund','gift_buy','gift_sell') ORDER BY id DESC LIMIT 20`)
       .all(u.tg_id).map((r) => ({ delta: r.delta, label: L[r.reason], ts: r.ts }));
   },
   '/api/gifts': (u) => ({
@@ -538,7 +566,7 @@ const routes = {
     return { revealed: old, fair: fair(getUser(x.tg_id)) };
   },
 };
-const KNOWN = new Set(['bad_amount', 'bad_auto', 'bad_game', 'bad_cell', 'no_game', 'forbidden', 'wd_pending', 'inv_full', 'no_balance', 'round_active', 'late', 'terms', 'bad_json', 'big']);
+const KNOWN = new Set(['bad_amount', 'bad_auto', 'bad_game', 'bad_cell', 'no_game', 'forbidden', 'wd_pending', 'inv_full', 'no_balance', 'round_active', 'late', 'terms', 'dep_pending', 'bad_json', 'big']);
 
 /* ---------- admin security + Telegram bot notifications ---------- */
 const audit = (admin, action, target, detail = '') =>
@@ -575,6 +603,33 @@ function notifyWithdraw(wid, x, amount, before) { // the bot sends the admin the
   const kb = { inline_keyboard: [[{ text: '✅ Выплачено', callback_data: `wd:paid:${wid}` }, { text: '❌ Отклонить', callback_data: `wd:rej:${wid}` }]] };
   for (const id of ADMIN_IDS) sendSafe(id, text, { reply_markup: kb });
   sendSafe(x.tg_id, `✅ Заявка #${wid} на ${num(amount)} ◆ принята.\nВывод делается в течение 8 часов.`);
+}
+function notifyDeposit(did, x, amount) { // the bot sends the admin the player's data + confirm/reject buttons
+  const s = stats(x.tg_id);
+  const text = `💰 Заявка на пополнение #${did}\n\n🆔 ${x.tg_id}${x.username ? ` (@${x.username})` : ''}${x.first_name ? ` · ${x.first_name}` : ''}\n`
+    + `🎮 Сыграно игр: ${s.games} (ставок на ${num(s.wagered)} ◆)\n💵 Хочет пополнить на: ${num(amount)} ◆\n`
+    + `💼 Сумма на счету: ${num(getUser(x.tg_id).balance)} ◆\n🕒 ${fmtDate(Date.now())}`;
+  const kb = { inline_keyboard: [[{ text: `✅ Начислить ${num(amount)} ◆`, callback_data: `dp:ok:${did}` }, { text: '❌ Отклонить', callback_data: `dp:no:${did}` }]] };
+  for (const id of ADMIN_IDS) sendSafe(id, text, { reply_markup: kb });
+  sendSafe(x.tg_id, `✅ Заявка #${did} на пополнение ${num(amount)} ◆ принята.\nНапиши админу${CONTACT ? ` (@${CONTACT})` : ''}, чтобы он подтвердил пополнение и начислил монеты.`);
+}
+function reviewDeposit(id, status, adminId, amount) { // 'paid' credits the coins (the admin may choose another amount), 'rejected' only closes the request
+  const r = tx(() => {
+    const d = db.prepare(`SELECT * FROM deposits WHERE id=? AND status='pending'`).get(id);
+    if (!d) throw new Error('no_game');
+    let credited = 0;
+    if (status === 'paid') {
+      credited = amount == null ? d.amount : amount;
+      if (!Number.isSafeInteger(credited) || credited < 1 || credited > 1e9) throw new Error('bad_amount');
+      db.prepare('UPDATE users SET balance=balance+? WHERE tg_id=?').run(credited, d.tg_id);
+      led(d.tg_id, credited, 'deposit', d.id);
+    }
+    db.prepare('UPDATE deposits SET status=?, credited=?, updated_at=? WHERE id=?').run(status, credited, Date.now(), d.id);
+    audit(adminId, `deposit_${status}`, d.tg_id, `#${d.id} ${credited || d.amount}`);
+    return { ...d, credited, balance: getUser(d.tg_id).balance };
+  });
+  sendSafe(r.tg_id, status === 'paid' ? `💰 Ваш счёт пополнен на ${num(r.credited)} ◆\nБаланс: ${num(r.balance)} ◆` : `❌ Заявка #${r.id} на пополнение отклонена.`);
+  return r;
 }
 function notifyGiftWithdraw(wid, x, g) {
   const s = stats(x.tg_id);
@@ -621,6 +676,17 @@ async function handleUpdate(up) { // /start, rules buttons and the admin's butto
   if (up.message && /^\/start(\s|$)/.test(up.message.text || '')) return sendWelcome(up.message.chat.id, up.message.from.id);
   const cb = up.callback_query; if (!cb) return;
   if ((cb.data || '').startsWith('terms:')) return handleTerms(cb);
+  const dp = /^dp:(ok|no):(\d+)$/.exec(cb.data || '');
+  if (dp) { // ✅ / ❌ under a deposit request
+    const answer = (text) => tgCall('answerCallbackQuery', { callback_query_id: cb.id, text, show_alert: true }).catch(() => {});
+    if (!ADMIN_IDS.has(cb.from.id)) { audit(cb.from.id, 'denied', null, 'bot button'); return answer('Нет доступа'); }
+    const ok = dp[1] === 'ok';
+    let r;
+    try { r = reviewDeposit(Number(dp[2]), ok ? 'paid' : 'rejected', cb.from.id); } catch { return answer('Заявка уже обработана'); }
+    await answer(ok ? `Начислено ${num(r.credited)} ◆` : 'Отклонено');
+    if (cb.message) await tgCall('editMessageText', { chat_id: cb.message.chat.id, message_id: cb.message.message_id, text: `${cb.message.text}\n\n${ok ? `✅ НАЧИСЛЕНО ${num(r.credited)} ◆` : '❌ ОТКЛОНЕНО'} · ${fmtDate(Date.now())}` }).catch(() => {});
+    return;
+  }
   const m = /^wd:(paid|rej):(\d+)$/.exec(cb.data || ''); if (!m) return;
   const answer = (text) => tgCall('answerCallbackQuery', { callback_query_id: cb.id, text, show_alert: true }).catch(() => {});
   if (!ADMIN_IDS.has(cb.from.id)) { audit(cb.from.id, 'denied', null, 'bot button'); return answer('Нет доступа'); }
