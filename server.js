@@ -19,7 +19,19 @@ const INDEX = [path.join(import.meta.dirname, 'index.html'), path.join(import.me
 /* ---------- database ---------- */
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const db = new DatabaseSync(DB_PATH);
-try { fs.chmodSync(DB_PATH, 0o600); } catch {}
+try { db.chmodSync(DB_PATH, 0o600); } catch {}
+// Separate durable accounting database. The game database remains the source of player balances;
+// every ledger movement is mirrored here for independent financial reporting/audit.
+const BANK_DB_PATH = process.env.BANK_DB_PATH || path.join(path.dirname(DB_PATH), 'bank.db');
+fs.mkdirSync(path.dirname(BANK_DB_PATH), { recursive: true });
+const bankDb = new DatabaseSync(BANK_DB_PATH);
+try { fs.chmodSync(BANK_DB_PATH, 0o600); } catch {}
+bankDb.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
+CREATE TABLE IF NOT EXISTS bank_ledger(
+ id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER UNIQUE, tg_id INTEGER NOT NULL,
+ delta INTEGER NOT NULL, reason TEXT NOT NULL, ref_id INTEGER, ts INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS bank_ledger_ts ON bank_ledger(ts);
+CREATE TABLE IF NOT EXISTS bank_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);`);
 db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
 CREATE TABLE IF NOT EXISTS users(
   tg_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT,
@@ -91,6 +103,14 @@ const PAY_TOKEN = process.env.CRYPTO_PAY_TOKEN || '';
 const PAY_API = (process.env.CRYPTO_PAY_API || 'https://pay.crypt.bot/api').replace(/\/$/, '');
 const COINS_PER_USDT = Math.max(1, Math.floor(Number(process.env.COINS_PER_USDT)) || 100);
 const MIN_USDT = Math.max(0.1, Number(process.env.MIN_USDT) || 1), MAX_USDT = 5000;
+const CRYPTO_PAYOUTS_ENABLED = process.env.CRYPTO_PAY_TRANSFERS_ENABLED === 'true';
+// A process crash during a provider call is ambiguous; keep funds held for manual reconciliation.
+
+const MIN_WD_USDT = Math.max(1, Number(process.env.MIN_WD_USDT) || 1);
+try { db.exec('ALTER TABLE withdrawals ADD COLUMN recipient_tg INTEGER'); } catch {}
+try { db.exec('ALTER TABLE withdrawals ADD COLUMN usdt REAL'); } catch {}
+try { db.exec('ALTER TABLE withdrawals ADD COLUMN transfer_id INTEGER'); } catch {}
+db.prepare(`UPDATE withdrawals SET status='payout_review',updated_at=? WHERE status='processing' AND gift IS NULL`).run(Date.now());
 db.exec(`CREATE TABLE IF NOT EXISTS terms(tg_id INTEGER PRIMARY KEY, version INTEGER NOT NULL, ts INTEGER NOT NULL);`);
 const TERMS_VERSION = 3; // bump it to make everybody accept new rules again
 const WEBAPP_URL = process.env.WEBAPP_URL || ''; // public URL of the game, used for the "Играть" button in the bot
@@ -144,7 +164,14 @@ const tx = (fn) => {
 };
 const getUser = (id) => db.prepare('SELECT * FROM users WHERE tg_id=?').get(id);
 const flying = (id) => db.prepare(`SELECT * FROM rounds WHERE tg_id=? AND status='flying'`).get(id);
-const led = (id, d, why, rid) => db.prepare('INSERT INTO ledger(tg_id,delta,reason,round_id,ts) VALUES(?,?,?,?,?)').run(id, d, why, rid, Date.now());
+const led = (id, d, why, rid) => {
+  const ts = Date.now();
+  const r = db.prepare('INSERT INTO ledger(tg_id,delta,reason,round_id,ts) VALUES(?,?,?,?,?)').run(id, d, why, rid, ts);
+  bankDb.prepare('INSERT OR IGNORE INTO bank_ledger(source_id,tg_id,delta,reason,ref_id,ts) VALUES(?,?,?,?,?,?)').run(Number(r.lastInsertRowid), id, d, why, rid ?? null, ts);
+  return r;
+};
+// Backfill ledger entries created before the separate bank database was introduced.
+for (const row of db.prepare('SELECT id,tg_id,delta,reason,round_id,ts FROM ledger').all()) bankDb.prepare('INSERT OR IGNORE INTO bank_ledger(source_id,tg_id,delta,reason,ref_id,ts) VALUES(?,?,?,?,?,?)').run(row.id,row.tg_id,row.delta,row.reason,row.round_id,row.ts);
 
 /* ---------- crypto ---------- */
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
@@ -501,22 +528,59 @@ const routes = {
     const ch = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) bet, COALESCE(SUM(payout),0) won, COALESCE(MAX(CASE WHEN status='win' THEN mult END),0) best FROM chicken WHERE tg_id=? AND status!='active'`).get(u.tg_id);
     const m = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) bet, COALESCE(SUM(payout),0) won, COALESCE(MAX(CASE WHEN status='win' THEN mult END),0) best FROM mines WHERE tg_id=? AND status!='active'`).get(u.tg_id);
     const w = db.prepare('SELECT id, amount, status, created_at, gift FROM withdrawals WHERE tg_id=? ORDER BY id DESC LIMIT 10').all(u.tg_id).map((r) => ({ ...r, gift_name: giftName(r.gift) }));
-    return { id: x.tg_id, name: x.first_name, username: x.username, since: x.created_at, balance: x.balance, crash: { ...c }, mines: { ...m }, chicken: { ...ch }, withdrawals: w, contact: CONTACT, min_dep: MIN_DEP, ref: refInfo(u.tg_id), pay: { enabled: !!PAY_TOKEN, min: MIN_USDT, rate: COINS_PER_USDT }, invoices: myInvoices(u.tg_id),
+    return { id: x.tg_id, name: x.first_name, username: x.username, since: x.created_at, balance: x.balance, crash: { ...c }, mines: { ...m }, chicken: { ...ch }, withdrawals: w, contact: CONTACT, min_dep: MIN_DEP, ref: refInfo(u.tg_id), pay: { enabled: !!PAY_TOKEN, min: MIN_USDT, rate: COINS_PER_USDT }, payout: { enabled: !!PAY_TOKEN && CRYPTO_PAYOUTS_ENABLED, minCoins: Math.max(MIN_WD, Math.ceil(MIN_WD_USDT * COINS_PER_USDT)), minUsdt: MIN_WD_USDT }, invoices: myInvoices(u.tg_id),
       deposits: db.prepare('SELECT id, amount, credited, status, created_at FROM deposits WHERE tg_id=? ORDER BY id DESC LIMIT 10').all(u.tg_id).map((r) => ({ ...r })), admin: ADMIN_IDS.has(x.tg_id) };
   },
-  '/api/withdraw': (u, b) => { // request only: funds are held until the request is reviewed
-    const amount = b.amount;
-    if (!Number.isSafeInteger(amount) || amount < MIN_WD) throw new Error('bad_amount');
-    return tx(() => {
-      const x = getUser(u.tg_id);
-      if (x.balance < amount) throw new Error('no_balance');
-      if (db.prepare(`SELECT 1 FROM withdrawals WHERE tg_id=? AND status='pending' AND gift IS NULL`).get(x.tg_id)) throw new Error('wd_pending');
-      db.prepare('UPDATE users SET balance=balance-? WHERE tg_id=?').run(amount, x.tg_id);
-      const id = db.prepare('INSERT INTO withdrawals(tg_id,amount,created_at,updated_at) VALUES(?,?,?,?)').run(x.tg_id, amount, Date.now(), Date.now()).lastInsertRowid;
-      led(x.tg_id, -amount, 'withdraw_hold', id);
-      try { notifyWithdraw(id, x, amount, x.balance); } catch (e) { console.error('notify:', e.message); } // a failed message must never block a withdrawal request
-      return { balance: getUser(x.tg_id).balance, id };
+  '/api/withdraw': async (u, b) => { // automatic Crypto Pay transfer to the user's Telegram ID
+    if (!PAY_TOKEN || !CRYPTO_PAYOUTS_ENABLED) throw new Error('payout_disabled');
+    const amount = b.amount, minCoins = Math.max(MIN_WD, Math.ceil(MIN_WD_USDT * COINS_PER_USDT));
+    if (!Number.isSafeInteger(amount) || amount < minCoins) throw new Error('bad_amount');
+    const usdt = Math.floor((amount / COINS_PER_USDT) * 100) / 100;
+    if (usdt < MIN_WD_USDT || usdt > 25000) throw new Error('bad_amount');
+    const x = getUser(u.tg_id);
+    if (x.balance < amount) throw new Error('no_balance');
+    const id = tx(() => {
+      const fresh = getUser(u.tg_id);
+      if (fresh.balance < amount) throw new Error('no_balance');
+      if (db.prepare(`SELECT 1 FROM withdrawals WHERE tg_id=? AND status IN ('pending','processing','payout_review') AND gift IS NULL`).get(fresh.tg_id)) throw new Error('wd_pending');
+      db.prepare('UPDATE users SET balance=balance-? WHERE tg_id=?').run(amount, fresh.tg_id);
+      const wid = db.prepare(`INSERT INTO withdrawals(tg_id,amount,status,created_at,updated_at,recipient_tg,usdt) VALUES(?,?,'processing',?,?,?,?)`).run(fresh.tg_id, amount, Date.now(), Date.now(), fresh.tg_id, usdt).lastInsertRowid;
+      led(fresh.tg_id, -amount, 'withdraw_hold', wid);
+      return wid;
     });
+    try {
+      // Crypto Pay transfers must be enabled under My Apps -> Security -> Transfers.
+      const tr = await cryptoApi('transfer', { user_id: u.tg_id, asset: 'USDT', amount: usdt.toFixed(2), spend_id: `neon_wd_${id}`, comment: `Neon Arcade withdrawal #${id}` });
+      tx(() => db.prepare(`UPDATE withdrawals SET status='paid',transfer_id=?,updated_at=? WHERE id=? AND status='processing'`).run(tr.transfer_id, Date.now(), id));
+      sendSafe(u.tg_id, `💸 Вывод #${id} выполнен автоматически: ${usdt.toFixed(2)} USDT отправлены через Crypto Pay.
+Списано: ${num(amount)} ◆`);
+      return { balance: getUser(u.tg_id).balance, id, status: 'paid', usdt };
+    } catch (e) {
+      // Do not refund on an ambiguous network error: first check Crypto Pay by idempotency key.
+      try {
+        const found = await cryptoApi('getTransfers', { spend_id: `neon_wd_${id}`, asset: 'USDT' });
+        const list = Array.isArray(found) ? found : (found.items || []);
+        const tr = list.find(x => x.spend_id === `neon_wd_${id}`);
+        if (tr) {
+          tx(() => db.prepare(`UPDATE withdrawals SET status='paid',transfer_id=?,updated_at=? WHERE id=? AND status='processing'`).run(tr.transfer_id, Date.now(), id));
+          sendSafe(u.tg_id, `💸 Вывод #${id} подтверждён Crypto Pay: ${usdt.toFixed(2)} USDT.`);
+          return { balance: getUser(u.tg_id).balance, id, status: 'paid', usdt };
+        }
+      } catch {}
+      if (e.providerRejected) {
+        tx(() => {
+          const changed = db.prepare(`UPDATE withdrawals SET status='rejected',updated_at=? WHERE id=? AND status='processing'`).run(Date.now(), id);
+          if (changed.changes) { db.prepare('UPDATE users SET balance=balance+? WHERE tg_id=?').run(amount, u.tg_id); led(u.tg_id, amount, 'withdraw_refund', id); }
+        });
+        sendSafe(u.tg_id, `❌ Crypto Pay отклонил выплату #${id}. ${num(amount)} ◆ возвращены на баланс. Проверь, что ты запускал @CryptoBot.`);
+        return { balance: getUser(u.tg_id).balance, id, status: 'rejected', usdt };
+      }
+      db.prepare(`UPDATE withdrawals SET status='payout_review',updated_at=? WHERE id=? AND status='processing'`).run(Date.now(), id);
+      for (const adminId of ADMIN_IDS) sendSafe(adminId, `⚠️ Вывод #${id} (${u.tg_id}, ${usdt.toFixed(2)} USDT) требует проверки Crypto Pay. Средства удержаны, повторно не отправляйте выплату до проверки /report.`);
+      sendSafe(u.tg_id, `⏳ Заявка #${id} создана, но Crypto Pay не подтвердил результат. Средства временно удержаны до проверки; повторную заявку создавать не нужно.`);
+      console.error('Crypto Pay payout:', e.message);
+      return { balance: getUser(u.tg_id).balance, id, status: 'payout_review', usdt };
+    }
   },
   '/api/admin/list': (u, b, t) => {
     assertAdmin(u, t, 'list');
@@ -542,7 +606,7 @@ const routes = {
       deposits: sum(['deposit', 'crypto_deposit']), withdrawals: wd.s, withdrawals_n: wd.n, gifts_out: gw.s, gifts_out_n: gw.n,
       gifts_bought: -sum(['gift_buy']), referral: sum(['referral']),
       balances: { ...db.prepare('SELECT COALESCE(SUM(balance),0) s, COUNT(*) n FROM users').get() },
-      pending: { wd: db.prepare(`SELECT COUNT(*) n FROM withdrawals WHERE status='pending'`).get().n, dep: db.prepare(`SELECT COUNT(*) n FROM deposits WHERE status='pending'`).get().n },
+      pending: { wd: db.prepare(`SELECT COUNT(*) n FROM withdrawals WHERE status IN ('pending','processing','payout_review')`).get().n, dep: db.prepare(`SELECT COUNT(*) n FROM deposits WHERE status='pending'`).get().n },
     };
   },
   '/api/admin/limits': (u, b, t) => { // read or change max bet / max payout per round
@@ -639,7 +703,7 @@ const routes = {
     return { revealed: old, fair: fair(getUser(x.tg_id)) };
   },
 };
-const KNOWN = new Set(['bad_amount', 'bad_auto', 'bad_game', 'bad_cell', 'no_game', 'forbidden', 'wd_pending', 'inv_full', 'no_balance', 'round_active', 'late', 'terms', 'pay_failed', 'dep_pending', 'bad_json', 'big']);
+const KNOWN = new Set(['bad_amount', 'bad_auto', 'bad_game', 'bad_cell', 'no_game', 'forbidden', 'wd_pending', 'inv_full', 'no_balance', 'round_active', 'late', 'terms', 'pay_failed', 'dep_pending', 'bad_json', 'big', 'payout_disabled']);
 
 /* ---------- admin security + Telegram bot notifications ---------- */
 const audit = (admin, action, target, detail = '') =>
@@ -682,7 +746,7 @@ async function cryptoApi(method, params) { // server-to-server only, the token n
     method: 'POST', headers: { 'Content-Type': 'application/json', 'Crypto-Pay-API-Token': PAY_TOKEN }, body: JSON.stringify(params), signal: AbortSignal.timeout(15000),
   });
   const j = await r.json();
-  if (!j.ok) throw new Error(`${method}: ${j.error?.name || j.error || r.status}`);
+  if (!j.ok) { const e = new Error(`${method}: ${j.error?.name || j.error || r.status}`); e.providerRejected = true; throw e; }
   return j.result;
 }
 function creditInvoice(inv) { // idempotent: only the pending -> paid transition credits the coins, so a double check never pays twice
@@ -785,9 +849,24 @@ function reviewWithdrawal(id, status, adminId) {
 }
 const WELCOME = '👋 Добро пожаловать в Neon Arcade!\n\n🚀 Crash · 💎 Mines · 🐔 Chicken Run · 🎁 Апгрейд подарков\n\nПеред началом прочитай правила и пользовательское соглашение. Нажимая «Согласен», ты подтверждаешь, что тебе исполнилось 18 лет и ты принимаешь правила.';
 const playKb = () => (WEBAPP_URL ? { inline_keyboard: [[{ text: '🎮 Играть', web_app: { url: WEBAPP_URL } }]] } : undefined);
-function sendWelcome(chatId, uid) { // answer to /start
+async function sendWelcome(chatId, uid) { // photo welcome for first-time users; compact return message afterwards
   if (hasAgreed(uid)) return sendSafe(chatId, `👋 С возвращением! Нажми «Играть», чтобы открыть Neon Arcade.${WEBAPP_URL ? '' : '\n(Кнопка игры слева от поля ввода.)'}`, { reply_markup: playKb() });
-  return sendSafe(chatId, WELCOME, { reply_markup: { inline_keyboard: [[{ text: '📄 Читать правила', callback_data: 'terms:rules' }], [{ text: '✅ Согласен', callback_data: 'terms:yes' }, { text: '❌ Не согласен', callback_data: 'terms:no' }]] } });
+  const reply_markup = { inline_keyboard: [[{ text: '📄 Читать правила', callback_data: 'terms:rules' }], [{ text: '✅ Согласен', callback_data: 'terms:yes' }, { text: '❌ Не согласен', callback_data: 'terms:no' }]] };
+  try {
+    const bytes = await fs.promises.readFile(path.join(import.meta.dirname, 'assets', 'cash-king-welcome.png'));
+    const form = new FormData();
+    form.append('chat_id', String(chatId));
+    form.append('photo', new Blob([bytes], { type: 'image/png' }), 'cash-king-welcome.png');
+    form.append('caption', WELCOME);
+    form.append('reply_markup', JSON.stringify(reply_markup));
+    const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, { method: 'POST', body: form, signal: AbortSignal.timeout(15000) });
+    const result = await response.json();
+    if (result.ok) return result.result;
+    throw new Error(result.description || 'sendPhoto failed');
+  } catch (e) {
+    console.error('welcome photo:', e.message);
+    return sendSafe(chatId, WELCOME, { reply_markup });
+  }
 }
 async function handleTerms(cb) {
   const chat = cb.message?.chat.id ?? cb.from.id;
@@ -800,8 +879,34 @@ async function handleTerms(cb) {
     return sendSafe(chat, `✅ Правила приняты. Приятной игры!\n\nОткрой игру${WEBAPP_URL ? ' кнопкой ниже.' : ' кнопкой меню слева от поля ввода.'}`, { reply_markup: playKb() });
   }
 }
-async function handleUpdate(up) { // /start, rules buttons and the admin's buttons under withdrawal messages
-  if (up.message && /^\/start(\s|$)/.test(up.message.text || '')) return sendWelcome(up.message.chat.id, up.message.from.id);
+function makeAdminReport(period='day') {
+  const now=Date.now(), since={day:startOfDay(now),week:now-7*864e5,month:now-30*864e5,all:0}[period] ?? startOfDay(now);
+  const sum=(reasons)=>bankDb.prepare(`SELECT COALESCE(SUM(delta),0) s FROM bank_ledger WHERE ts>=? AND reason IN (${reasons.map(()=>'?').join(',')})`).get(since,...reasons).s;
+  const bets=-sum(['crash_bet','crash_cancel','mines_bet','chicken_bet','bet']);
+  const wins=sum(['crash_win','mines_win','chicken_win','win']);
+  const deposits=sum(['deposit','crypto_deposit']);
+  const payouts=bankDb.prepare(`SELECT COALESCE(SUM(amount),0) s,COUNT(*) n FROM withdrawals WHERE status='paid' AND gift IS NULL AND updated_at>=?`).get(since);
+  const plus=Math.max(0,bets-wins), minus=Math.max(0,wins-bets), scale=Math.max(1,plus,minus);
+  const bar=(v)=>'█'.repeat(Math.max(1,Math.round(v/scale*12)));
+  const pending=db.prepare(`SELECT COUNT(*) n FROM withdrawals WHERE status IN ('pending','processing','payout_review') AND gift IS NULL`).get().n;
+  return `📊 CASH KING · ОТЧЁТ (${({day:'сегодня',week:'7 дней',month:'30 дней',all:'всё время'})[period]})\n\n`+
+    `💰 Пополнения: ${num(deposits)} ◆\n💸 Выводы USDT: ${num(payouts.s)} ◆ (${payouts.n})\n`+
+    `🎮 Ставки: ${num(bets)} ◆\n🏆 Выигрыши: ${num(wins)} ◆\n`+
+    `🟢 Плюс: ${num(plus)} ◆\n🔴 Минус: ${num(minus)} ◆\n\n`+
+    `ДИАГРАММА РЕЗУЛЬТАТА\n🟢 ${bar(plus)} ${num(plus)} ◆\n🔴 ${bar(minus)} ${num(minus)} ◆\n\n`+
+    `👥 Игроков: ${db.prepare(`SELECT COUNT(DISTINCT tg_id) n FROM ledger WHERE ts>=?`).get(since).n}\n`+
+    `⏳ Выводы на проверке: ${pending}\n🏦 Отдельный банк: ${BANK_DB_PATH}`;
+}
+async function handleUpdate(up) { // /start, admin reports and terms callbacks
+  if (up.message) {
+    const msg=up.message.text || '';
+    if (/^\/start(\s|$)/.test(msg)) return sendWelcome(up.message.chat.id, up.message.from.id);
+    const rep=/^\/report(?:@\w+)?(?:\s+(day|week|month|all))?\s*$/i.exec(msg);
+    if (rep) {
+      if (!ADMIN_IDS.has(up.message.from.id)) return sendSafe(up.message.chat.id, '⛔ Команда доступна только администратору.');
+      return sendSafe(up.message.chat.id, makeAdminReport((rep[1]||'day').toLowerCase()));
+    }
+  }
   const cb = up.callback_query; if (!cb) return;
   if ((cb.data || '').startsWith('terms:')) return handleTerms(cb);
   const dp = /^dp:(ok|no):(\d+)$/.exec(cb.data || '');

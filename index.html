@@ -95,7 +95,7 @@ input:disabled{opacity:.45}
 .lane.burn{border-color:var(--red);background:#2a0612;box-shadow:0 0 14px #ff3b5ccc}
 #terms{position:fixed;inset:0;z-index:100;background:var(--bg);overflow-y:auto;padding:calc(14px + env(safe-area-inset-top,0px)) 14px calc(24px + env(safe-area-inset-bottom,0px))}
 .tbox{max-width:480px;margin:0 auto}.tbox h2{color:var(--cyan);text-shadow:0 0 10px var(--cyan);font-size:19px;margin:6px 0}
-#termstext{white-space:pre-wrap;font-size:14px;line-height:1.45;background:var(--panel);border:1px solid #3a2a63;border-radius:14px;padding:12px;margin:10px 0}
+.termsfold{background:var(--panel);border:1px solid #3a2a63;border-radius:14px;padding:10px;margin:10px 0}.termsfold summary{color:var(--cyan);font-weight:700;cursor:pointer;padding:4px}#termstext{white-space:pre-wrap;font-size:14px;line-height:1.45;background:var(--panel);border:1px solid #3a2a63;border-radius:14px;padding:12px;margin:10px 0}
 .tck{display:flex;gap:10px;align-items:flex-start;font-size:14px;margin:12px 0}
 .tck input{width:24px;height:24px;flex:none;margin:0;padding:0;box-shadow:none}
 </style>
@@ -104,7 +104,7 @@ input:disabled{opacity:.45}
 <div id="terms" hidden>
   <div class="tbox">
     <h2>Пользовательское соглашение и правила</h2>
-    <div id="termstext"></div>
+    <details class="termsfold"><summary>📄 Открыть полный текст соглашения</summary><div id="termstext"></div></details>
     <label class="tck"><input type="checkbox" id="tcheck"><span>Мне исполнилось 18 лет, я прочитал(а) и принимаю правила</span></label>
     <button class="go" id="tyes" disabled>✅ Согласен</button>
     <button class="mc" id="tno" style="width:100%;margin-top:8px">❌ Не согласен</button>
@@ -215,11 +215,12 @@ input:disabled{opacity:.45}
       <div class="lbl">Мои заявки на пополнение</div><div id="dplist"></div>
     </div>
     <div class="panel">
-      <div class="lbl">Вывод средств (минимум 50 ◆)</div>
-      <input id="wd" type="number" inputmode="numeric" min="50" placeholder="Сумма" style="margin-bottom:8px">
-      <button class="go" id="wdgo">Подать заявку на вывод</button>
+      <div class="lbl">Автоматический вывод · USDT через Crypto Pay</div>
+      <input id="wd" type="number" inputmode="numeric" min="100" placeholder="Сумма в ◆" style="margin-bottom:8px">
+      <div class="lbl" style="text-align:center">USDT отправляется на твой Telegram ID в CryptoBot. Сначала открой @CryptoBot и нажми Start.</div>
+      <button class="go" id="wdgo">Вывести USDT автоматически</button>
       <div class="mmsg" id="wdmsg"></div>
-      <div class="lbl" style="text-align:center">Вывод делается в течение 8 часов.</div>
+      <div class="lbl" style="text-align:center">Минимум — эквивалент 1 USDT. Нужен доступный баланс Crypto Pay.</div>
       <div class="lbl">Мои заявки</div><div id="wdlist"></div>
     </div>
     <div class="panel">
@@ -404,7 +405,7 @@ input:disabled{opacity:.45}
   }
   function errText(e){
     var m=e&&e.message;
-    return m==='unauthorized'?((tg&&tg.initData)?'Ошибка входа: проверь BOT_TOKEN на сервере':'Открой игру через Telegram'):m==='terms'?'Нужно принять правила':m==='no_balance'?'Не хватает баланса':m==='round_active'?'Ставка уже есть':m==='late'?'Поздно: ставки закрыты или раунд закончился':m==='slow_down'?'Слишком часто':m==='pay_failed'?'Не удалось создать счёт, попробуй позже':m==='dep_pending'?'Заявка на пополнение уже есть, ждём подтверждения':m==='wd_pending'?'Предыдущая заявка ещё на рассмотрении':m==='bad_amount'?'Неверная сумма или превышен лимит':m==='forbidden'?'Нет доступа (админ-сессия старше часа: закрой и открой приложение)':m==='no_game'?'Не найдено':m==='inv_full'?'Инвентарь полон':'Ошибка связи ('+(m||'?')+')';
+    return m==='unauthorized'?((tg&&tg.initData)?'Ошибка входа: проверь BOT_TOKEN на сервере':'Открой игру через Telegram'):m==='terms'?'Нужно принять правила':m==='no_balance'?'Не хватает баланса':m==='round_active'?'Ставка уже есть':m==='late'?'Поздно: ставки закрыты или раунд закончился':m==='slow_down'?'Слишком часто':m==='pay_failed'?'Не удалось создать счёт, попробуй позже':m==='payout_disabled'?'Автоматические выплаты пока не включены администратором':m==='dep_pending'?'Заявка на пополнение уже есть, ждём подтверждения':m==='wd_pending'?'Предыдущая заявка ещё на рассмотрении':m==='bad_amount'?'Неверная сумма или превышен лимит':m==='forbidden'?'Нет доступа (админ-сессия старше часа: закрой и открой приложение)':m==='no_game'?'Не найдено':m==='inv_full'?'Инвентарь полон':'Ошибка связи ('+(m||'?')+')';
   }
   function showFair(f){if(f){var t='Provably fair · hash '+f.hash.slice(0,16)+'… · nonce '+f.nonce;$('fair2').textContent=t;$('fair3').textContent=t}}
   var LIM={maxBet:10000,maxPayout:100000};
@@ -698,7 +699,7 @@ input:disabled{opacity:.45}
     d.appendChild(a);d.appendChild(b);parent.appendChild(d);
   }
   function fdate(ts){var d=new Date(ts);return d.toLocaleDateString('ru-RU')+' '+d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})}
-  var WS={pending:'На рассмотрении',paid:'Выплачено',rejected:'Отклонено'};
+  var WS={pending:'На рассмотрении',processing:'Выполняется',payout_review:'Проверка выплаты',paid:'Выплачено',rejected:'Отклонено'};
   function loadProfile(){
     api('/api/profile').then(function(r){st.bal=r.balance;bal();
       var p=$('pinfo');p.innerHTML='';
@@ -719,14 +720,14 @@ input:disabled{opacity:.45}
         var b=document.createElement('span');b.className='st '+w.status;b.textContent=WS[w.status]||w.status;
         d.appendChild(a);d.appendChild(b);l.appendChild(d);
       });
-      loadOps();loadDeps(r);loadRef(r);loadPay(r);$('padmin').hidden=!r.admin;if(r.admin){loadAdmin();loadAdminDeps();loadStats()}
+      loadOps();loadDeps(r);loadRef(r);loadPay(r);$('wdgo').disabled=!(r.payout&&r.payout.enabled);$('wdgo').textContent=(r.payout&&r.payout.enabled)?'Вывести USDT автоматически':'Автовывод временно недоступен';if(r.payout&&r.payout.enabled){$('wd').min=r.payout.minCoins;$('wd').placeholder='Минимум '+r.payout.minCoins+' ◆';} $('padmin').hidden=!r.admin;if(r.admin){loadAdmin();loadAdminDeps();loadStats()}
     }).catch(function(e){$('wdmsg').textContent=errText(e)});
   }
   $('wdgo').onclick=function(){if(tg&&tg.requestWriteAccess){try{tg.requestWriteAccess()}catch(e){}}
     var a=Math.floor(+$('wd').value),m=$('wdmsg');
-    if(!(a>=50)){m.textContent='Минимум 50 ◆';m.className='mmsg l';return}
+    if(!(a>=100)){m.textContent='Минимальная сумма — эквивалент 1 USDT (обычно от 100 ◆)';m.className='mmsg l';return}
     api('/api/withdraw',{amount:a}).then(function(r){
-      st.bal=r.balance;bal();$('wd').value='';m.textContent='Заявка отправлена';m.className='mmsg w';loadProfile();
+      st.bal=r.balance;bal();$('wd').value='';m.textContent=r.status==='paid'?'Выплата отправлена: '+r.usdt+' USDT':'Выплата ожидает проверки Crypto Pay';m.className='mmsg w';loadProfile();
     }).catch(function(e){m.textContent=errText(e);m.className='mmsg l'});
   };
   var DS={pending:'На рассмотрении',paid:'Начислено',rejected:'Отклонено'},minDep=50;
