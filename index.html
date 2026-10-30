@@ -113,7 +113,7 @@ input:disabled{opacity:.45}
 </div>
 <div class="app">
   <div class="top">
-    <h1>NEON ARCADE <small style="font-size:11px;color:var(--dim);text-shadow:none">v12</small></h1>
+    <h1>NEON ARCADE <small style="font-size:11px;color:var(--dim);text-shadow:none">v13</small></h1>
     <div style="display:flex;align-items:center"><div class="bal" id="balbtn" style="cursor:pointer"><span id="bal">0</span> ◆ <b style="color:var(--lime)">＋</b></div><button class="mute on" id="mus" aria-label="Музыка">🎵</button><button class="mute" id="mute" aria-label="Звук">🔊</button></div>
   </div>
   <nav class="tabs"><button id="tab-crash" class="on">🚀 Crash</button><button id="tab-mines">💎 Mines</button><button id="tab-chicken">🐔 Chicken</button><button id="tab-up">🎁 Апгрейд</button><button id="tab-top">🏆 Топ</button><button id="tab-profile">👤 Профиль</button></nav>
@@ -131,6 +131,7 @@ input:disabled{opacity:.45}
     <div class="row" id="quick"></div>
     <button class="go" id="go">Взлёт</button>
     <div class="lbl" id="fair" style="margin:10px 0 0;word-break:break-all"></div>
+    <div class="lbl limtxt" style="margin:6px 0 0"></div>
   </div>
   </section>
 
@@ -149,6 +150,7 @@ input:disabled{opacity:.45}
     <div class="mmsg" id="mmsg"></div>
     <button class="go" id="mgo">Играть</button>
     <div class="lbl" id="fair2" style="margin:10px 0 0;word-break:break-all"></div>
+    <div class="lbl limtxt" style="margin:6px 0 0"></div>
   </section>
 
   <section id="t-chicken" hidden>
@@ -166,6 +168,7 @@ input:disabled{opacity:.45}
     <button class="go" id="chstep" hidden style="margin-bottom:8px">Идти ▶</button>
     <button class="go" id="chgo">Играть</button>
     <div class="lbl" id="fair3" style="margin:10px 0 0;word-break:break-all"></div>
+    <div class="lbl limtxt" style="margin:6px 0 0"></div>
   </section>
 
   <section id="t-up" hidden>
@@ -210,9 +213,22 @@ input:disabled{opacity:.45}
       <div class="lbl" style="text-align:center">Вывод делается в течение 8 часов.</div>
       <div class="lbl">Мои заявки</div><div id="wdlist"></div>
     </div>
+    <div class="panel">
+      <div class="lbl">Пригласи друзей: бонус <span id="refpct">5</span>% с их пополнений</div>
+      <div id="reflink" class="lbl" style="word-break:break-all;color:var(--cyan)">—</div>
+      <div class="row"><button class="mc" id="refcopy">Копировать ссылку</button><button class="mc" id="refshare">Поделиться</button></div>
+      <div id="refstat"></div>
+    </div>
     <div class="panel"><div class="lbl">Операции по счёту</div><div id="ophist"></div></div>
     <div class="panel" id="padmin" hidden>
-      <div class="lbl">Админ: заявки на рассмотрении</div><div id="adlist"></div>
+      <div class="lbl">Статистика</div>
+      <div class="row" id="statperiods"></div><div id="statbox"></div>
+      <div class="lbl" style="margin-top:14px">Лимиты (для всех игр)</div>
+      <input id="limbet" type="number" inputmode="numeric" placeholder="Макс. ставка ◆" style="margin-bottom:8px">
+      <input id="limpay" type="number" inputmode="numeric" placeholder="Макс. выплата за раунд ◆" style="margin-bottom:8px">
+      <button class="mc" id="limsave" style="width:100%">Сохранить лимиты</button>
+      <div class="mmsg" id="limmsg"></div>
+      <div class="lbl" style="margin-top:14px">Админ: заявки на рассмотрении</div><div id="adlist"></div>
       <div class="lbl" style="margin-top:14px">Заявки на пополнение</div><div id="addeps"></div>
       <div class="lbl" style="margin-top:14px">Изменить счёт игрока</div>
       <input id="adid" type="number" inputmode="numeric" placeholder="Telegram ID игрока" style="margin-bottom:8px">
@@ -379,16 +395,19 @@ input:disabled{opacity:.45}
   }
   function errText(e){
     var m=e&&e.message;
-    return m==='unauthorized'?((tg&&tg.initData)?'Ошибка входа: проверь BOT_TOKEN на сервере':'Открой игру через Telegram'):m==='terms'?'Нужно принять правила':m==='no_balance'?'Не хватает баланса':m==='round_active'?'Ставка уже есть':m==='late'?'Поздно: ставки закрыты или раунд закончился':m==='slow_down'?'Слишком часто':m==='dep_pending'?'Заявка на пополнение уже есть, ждём подтверждения':m==='wd_pending'?'Предыдущая заявка ещё на рассмотрении':m==='bad_amount'?'Неверная сумма':m==='forbidden'?'Нет доступа (админ-сессия старше часа: закрой и открой приложение)':m==='no_game'?'Не найдено':m==='inv_full'?'Инвентарь полон':'Ошибка связи ('+(m||'?')+')';
+    return m==='unauthorized'?((tg&&tg.initData)?'Ошибка входа: проверь BOT_TOKEN на сервере':'Открой игру через Telegram'):m==='terms'?'Нужно принять правила':m==='no_balance'?'Не хватает баланса':m==='round_active'?'Ставка уже есть':m==='late'?'Поздно: ставки закрыты или раунд закончился':m==='slow_down'?'Слишком часто':m==='dep_pending'?'Заявка на пополнение уже есть, ждём подтверждения':m==='wd_pending'?'Предыдущая заявка ещё на рассмотрении':m==='bad_amount'?'Неверная сумма или превышен лимит':m==='forbidden'?'Нет доступа (админ-сессия старше часа: закрой и открой приложение)':m==='no_game'?'Не найдено':m==='inv_full'?'Инвентарь полон':'Ошибка связи ('+(m||'?')+')';
   }
   function showFair(f){if(f){var t='Provably fair · hash '+f.hash.slice(0,16)+'… · nonce '+f.nonce;$('fair2').textContent=t;$('fair3').textContent=t}}
+  var LIM={maxBet:10000,maxPayout:100000};
+  function cap(v){return Math.min(v,LIM.maxPayout)}
+  function setLim(l){if(!l)return;LIM=l;document.querySelectorAll('.limtxt').forEach(function(e){e.textContent='Макс. ставка '+money(l.maxBet)+' ◆ · макс. выплата за раунд '+money(l.maxPayout)+' ◆'})}
   var snap=null,off=0,authed=false,pollBusy=false,actBusy=false,lastId=0,histKey='',note=null;
   function sNow(){return Date.now()+off}
   function say(t){note={t:t,until:Date.now()+2500}}
   function setBtn(){
     var b=$('go'),my=st.my;b.classList.remove('cash');
     if(st.phase==='flying'){
-      if(my&&my.status==='open'){b.disabled=false;b.classList.add('cash');b.textContent='Забрать '+money(my.amount*curM)+' ◆'}
+      if(my&&my.status==='open'){b.disabled=false;b.classList.add('cash');b.textContent='Забрать '+money(cap(my.amount*curM))+' ◆'}
       else{b.disabled=true;b.textContent=my?'Ждём конец раунда':'Ставки закрыты, смотри полёт'}
     }else if(st.phase==='idle'){b.disabled=!authed;b.textContent=my?'Ставка принята, отменить':'Поставить ставку'}
     else{b.disabled=true;b.textContent='Следующий раунд...'}
@@ -480,7 +499,7 @@ input:disabled{opacity:.45}
   function boot(){ // login; until the rules are accepted the server returns only the rules text
     api('/api/auth').then(function(r){
       if(r.terms){showTerms(r.text);return}
-      $('terms').hidden=true;st.bal=r.balance;bal();showFair(r.fair);minesInit(r);chickenInit(r);authed=true;poll();
+      $('terms').hidden=true;st.bal=r.balance;bal();setLim(r.limits);showFair(r.fair);minesInit(r);chickenInit(r);authed=true;poll();
     }).catch(function(e){$('sub').textContent=errText(e)});
   }
   $('tcheck').onchange=function(){$('tyes').disabled=!$('tcheck').checked};
@@ -520,8 +539,8 @@ input:disabled{opacity:.45}
   function mStats(){
     var N=mt.n*mt.n;
     $('mm').textContent=mfmt(mt.mult);$('mn').textContent=mt.opened>=N-mt.k?'—':mfmt(mmult(mt.n,mt.k,mt.opened+1));
-    $('mw').textContent=money(mt.bet*mt.mult);
-    $('mgo').textContent=mt.opened?'Забрать '+money(mt.bet*mt.mult)+' ◆':'Открой клетку';$('mgo').disabled=!mt.opened;
+    $('mw').textContent=money(cap(mt.bet*mt.mult));
+    $('mgo').textContent=mt.opened?'Забрать '+money(cap(mt.bet*mt.mult))+' ◆':'Открой клетку';$('mgo').disabled=!mt.opened;
   }
   function mEnd(){
     mt.active=false;mLock(false);$('mgo').classList.remove('cash');$('mgo').disabled=false;$('mgo').textContent='Играть снова';
@@ -608,10 +627,10 @@ input:disabled{opacity:.45}
     }
     var cur=$('lane'+ch.step);if(cur)$('road').scrollLeft=Math.max(0,cur.offsetLeft-70);
     var m=ch.step?chmult(ch.level,ch.step):1;
-    $('chm').textContent=chf(m);$('chn').textContent=ch.step>=CHS?'—':chf(chmult(ch.level,ch.step+1));$('chw').textContent=money(ch.bet*m);
+    $('chm').textContent=chf(m);$('chn').textContent=ch.step>=CHS?'—':chf(chmult(ch.level,ch.step+1));$('chw').textContent=money(cap(ch.bet*m));
     $('chstats').hidden=!(ch.active||ch.done);
     var go=$('chgo'),sp=$('chstep');
-    if(ch.active){sp.hidden=false;sp.disabled=ch.busy;go.classList.add('cash');go.disabled=ch.step<1||ch.busy;go.textContent=ch.step?'Забрать '+money(ch.bet*m)+' ◆':'Сделай хотя бы один шаг'}
+    if(ch.active){sp.hidden=false;sp.disabled=ch.busy;go.classList.add('cash');go.disabled=ch.step<1||ch.busy;go.textContent=ch.step?'Забрать '+money(cap(ch.bet*m))+' ◆':'Сделай хотя бы один шаг'}
     else{sp.hidden=true;go.classList.remove('cash');go.disabled=ch.busy;go.textContent=ch.done?'Играть снова':'Играть'}
   }
   function chEnd(){ch.active=false;ch.done=true;chLock(false);chRender()}
@@ -691,7 +710,7 @@ input:disabled{opacity:.45}
         var b=document.createElement('span');b.className='st '+w.status;b.textContent=WS[w.status]||w.status;
         d.appendChild(a);d.appendChild(b);l.appendChild(d);
       });
-      loadOps();loadDeps(r);$('padmin').hidden=!r.admin;if(r.admin){loadAdmin();loadAdminDeps()}
+      loadOps();loadDeps(r);loadRef(r);$('padmin').hidden=!r.admin;if(r.admin){loadAdmin();loadAdminDeps();loadStats()}
     }).catch(function(e){$('wdmsg').textContent=errText(e)});
   }
   $('wdgo').onclick=function(){if(tg&&tg.requestWriteAccess){try{tg.requestWriteAccess()}catch(e){}}
@@ -743,6 +762,37 @@ input:disabled{opacity:.45}
       });
     }).catch(function(){});
   }
+  function loadRef(r){
+    var f=r.ref||{};$('refpct').textContent=f.percent||0;$('reflink').textContent=f.link||'Ссылка появится, когда бот полностью запустится';
+    var s=$('refstat');s.innerHTML='';kv(s,'Приглашено друзей',String(f.count||0));kv(s,'Заработано',money(f.earned||0)+' ◆');
+    $('refcopy').onclick=function(){
+      if(!f.link)return;var done=function(){$('refcopy').textContent='Скопировано ✅';setTimeout(function(){$('refcopy').textContent='Копировать ссылку'},1500)};
+      if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(f.link).then(done).catch(function(){});else done();
+    };
+    $('refshare').onclick=function(){
+      if(!f.link)return;var u='https://t.me/share/url?url='+encodeURIComponent(f.link)+'&text='+encodeURIComponent('Заходи в Neon Arcade 🚀');
+      if(tg&&tg.openTelegramLink)tg.openTelegramLink(u);else window.open(u,'_blank');
+    };
+  }
+  var statPeriod='day',PER={day:'Сегодня',week:'7 дней',month:'30 дней',all:'Всё время'};
+  function loadStats(){
+    var pr=$('statperiods');pr.innerHTML='';
+    Object.keys(PER).forEach(function(k){var b=document.createElement('button');b.className='mc'+(k===statPeriod?' on':'');b.textContent=PER[k];b.onclick=function(){statPeriod=k;loadStats()};pr.appendChild(b)});
+    api('/api/admin/stats',{period:statPeriod}).then(function(s){
+      var l=$('statbox');l.innerHTML='';
+      kv(l,'Оборот (ставки)',money(s.bets)+' ◆');kv(l,'Выплачено игрокам',money(s.wins)+' ◆');
+      kv(l,'Прибыль игр',(s.profit>=0?'+':'−')+money(Math.abs(s.profit))+' ◆');kv(l,'Возврат игрокам (RTP)',s.rtp+'%');kv(l,'Играли (человек)',String(s.players));
+      kv(l,'Пополнения',money(s.deposits)+' ◆');kv(l,'Выводы монет',money(s.withdrawals)+' ◆ · '+s.withdrawals_n+' шт.');
+      kv(l,'Подарки: куплено / выведено',money(s.gifts_bought)+' ◆ / '+money(s.gifts_out)+' ◆ ('+s.gifts_out_n+')');
+      kv(l,'Реферальные бонусы',money(s.referral)+' ◆');kv(l,'На балансах игроков',money(s.balances.s)+' ◆ · '+s.balances.n+' игр.');
+      kv(l,'Заявки в ожидании',s.pending.wd+' вывод · '+s.pending.dep+' пополнение');
+    }).catch(function(){});
+    api('/api/admin/limits').then(function(l){$('limbet').value=l.maxBet;$('limpay').value=l.maxPayout}).catch(function(){});
+  }
+  $('limsave').onclick=function(){
+    var mb=Math.floor(+$('limbet').value),mp=Math.floor(+$('limpay').value),m=$('limmsg');
+    api('/api/admin/limits',{maxBet:mb,maxPayout:mp}).then(function(l){setLim(l);m.className='mmsg w';m.textContent='Лимиты сохранены'}).catch(function(e){m.className='mmsg l';m.textContent=errText(e)});
+  };
   $('balbtn').onclick=function(){showTab('profile')};
   function loadOps(){
     api('/api/history').then(function(rows){

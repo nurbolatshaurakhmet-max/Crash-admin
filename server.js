@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS chicken(
   status TEXT NOT NULL DEFAULT 'active', mult REAL, payout INTEGER);
 CREATE UNIQUE INDEX IF NOT EXISTS one_chicken ON chicken(tg_id) WHERE status='active';`);
 db.exec(`CREATE TABLE IF NOT EXISTS terms(tg_id INTEGER PRIMARY KEY, version INTEGER NOT NULL, ts INTEGER NOT NULL);`);
-const TERMS_VERSION = 1; // bump it to make everybody accept new rules again
+const TERMS_VERSION = 2; // bump it to make everybody accept new rules again
 const WEBAPP_URL = process.env.WEBAPP_URL || ''; // public URL of the game, used for the "Играть" button in the bot
 const TERMS_TEXT = `ПОЛЬЗОВАТЕЛЬСКОЕ СОГЛАШЕНИЕ И ПРАВИЛА · Neon Arcade
 
@@ -95,7 +95,7 @@ Neon Arcade — игровое приложение в Telegram (Crash, Mines, C
 Один человек — один аккаунт Telegram. Мультиаккаунты, боты, скрипты, передача аккаунта и использование ошибок (багов) запрещены.
 
 3. Игры и риск
-Результат каждой игры определяется сервером случайно и не зависит от вашего устройства. Честность можно проверить: перед игрой публикуется хеш секретного ключа, а после игры сам ключ. Ставки окончательны. Любая игра связана с риском потерять ставку. Играйте только теми средствами, которые готовы потерять, и не пытайтесь отыграться любой ценой.
+Результат каждой игры определяется сервером случайно и не зависит от вашего устройства. Честность можно проверить: перед игрой публикуется хеш секретного ключа, а после игры сам ключ. Ставки окончательны. Максимальная ставка и максимальная выплата за один раунд ограничены, актуальные лимиты показаны в приложении. Любая игра связана с риском потерять ставку. Играйте только теми средствами, которые готовы потерять, и не пытайтесь отыграться любой ценой.
 
 4. Баланс, пополнение и вывод
 Пополнение и вывод выполняются вручную администратором. Заявки на вывод рассматриваются в течение 8 часов. Минимальная сумма вывода — ${MIN_WD} ◆. Администратор вправе запросить подтверждение данных и отклонить заявку при признаках нарушения правил.
@@ -118,6 +118,15 @@ db.exec(`CREATE TABLE IF NOT EXISTS deposits(
   status TEXT NOT NULL DEFAULT 'pending', credited INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);`);
 const MIN_DEP = Math.max(1, Math.floor(Number(process.env.MIN_DEPOSIT)) || 50);
 const CONTACT = /^@?[A-Za-z0-9_]{5,32}$/.test(process.env.ADMIN_CONTACT || '') ? process.env.ADMIN_CONTACT.replace(/^@/, '') : ''; // admin's @username shown to players
+db.exec(`CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS referrals(referred INTEGER PRIMARY KEY, referrer INTEGER NOT NULL, created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS ref_by ON referrals(referrer);`);
+const LIM = { maxBet: Number(process.env.MAX_BET) || 10000, maxPayout: Number(process.env.MAX_PAYOUT) || 100000 }; // changeable by the admin in the app
+for (const r of db.prepare('SELECT key, value FROM settings').all()) if (r.key in LIM) LIM[r.key] = Number(r.value);
+const capPay = (v) => Math.min(Math.floor(v), LIM.maxPayout); // max payout per round
+const REF_PERCENT = Math.min(50, Math.max(0, Number(process.env.REF_PERCENT ?? 5))); // % of a friend's deposits that the inviter receives
+const APP_NAME = process.env.APP_NAME || 'arcade'; // short name of the mini app in BotFather
+let BOT_USERNAME = '';
 const BET_MS = 5000, END_MS = 3000; // betting window (5 s) and pause after the crash
 const CH_LEVELS = { easy: 0.92, mid: 0.85, hard: 0.75 }, CH_STEPS = 20; // chance to survive one step
 
@@ -165,7 +174,7 @@ function verifyInit(raw) {
   const calc = crypto.createHmac('sha256', secret).update(data).digest();
   if (!crypto.timingSafeEqual(Buffer.from(hash, 'hex'), calc)) return null;
   if (Date.now() / 1000 - Number(p.get('auth_date')) > INIT_TTL) return null;
-  try { const u = JSON.parse(p.get('user')); return Number.isSafeInteger(u.id) ? { ...u, auth_date: Number(p.get('auth_date')) } : null; } catch { return null; }
+  try { const u = JSON.parse(p.get('user')); return Number.isSafeInteger(u.id) ? { ...u, auth_date: Number(p.get('auth_date')), start_param: p.get('start_param') || '' } : null; } catch { return null; }
 }
 function ensureUser(u) {
   let row = getUser(u.id);
@@ -177,6 +186,8 @@ function ensureUser(u) {
       if (START) led(u.id, START, 'signup', null);
     });
     row = getUser(u.id);
+    const m = /^ref_(\d{1,15})$/.exec(u.start_param || ''); // invited through a friend's link
+    if (m && Number(m[1]) !== u.id && getUser(Number(m[1]))) db.prepare('INSERT OR IGNORE INTO referrals(referred,referrer,created_at) VALUES(?,?,?)').run(u.id, Number(m[1]), Date.now());
   }
   return row;
 }
@@ -196,7 +207,7 @@ function minePositions(ss, cs, nonce, N, k) {
 const minesMult = (n, k, i) => { const N = n * n; let m = EDGE; for (let j = 0; j < i; j++) m *= (N - j) / (N - k - j); return m; };
 const activeMines = (id) => db.prepare(`SELECT * FROM mines WHERE tg_id=? AND status='active'`).get(id);
 function endMines(g, res, mult) {
-  const payout = res === 'win' ? Math.floor(g.amount * mult) : 0;
+  const payout = res === 'win' ? capPay(g.amount * mult) : 0;
   return tx(() => {
     const d = db.prepare(`UPDATE mines SET status=?, mult=?, payout=? WHERE id=? AND status='active'`).run(res, mult, payout, g.id);
     if (d.changes === 1) {
@@ -241,7 +252,7 @@ function newRound(t0) {
   return id;
 }
 function winBet(b, mult) {
-  const payout = Math.floor(b.amount * mult);
+  const payout = capPay(b.amount * mult);
   tx(() => {
     const d = db.prepare(`UPDATE crash_bets SET status='win', mult=?, payout=? WHERE id=? AND status='open'`).run(mult, payout, b.id);
     if (d.changes === 1) { db.prepare('UPDATE users SET balance=balance+? WHERE tg_id=?').run(payout, b.tg_id); led(b.tg_id, payout, 'crash_win', b.round_id); }
@@ -251,7 +262,7 @@ function settleRound(r) { // everyone who did not cash out: auto-cashout wins, t
   tx(() => {
     for (const b of db.prepare(`SELECT * FROM crash_bets WHERE round_id=? AND status='open'`).all(r.id)) {
       if (b.auto && b.auto <= r.crash) {
-        const p = Math.floor(b.amount * b.auto);
+        const p = capPay(b.amount * b.auto);
         db.prepare(`UPDATE crash_bets SET status='win', mult=?, payout=? WHERE id=?`).run(b.auto, p, b.id);
         db.prepare('UPDATE users SET balance=balance+? WHERE tg_id=?').run(p, b.tg_id); led(b.tg_id, p, 'crash_win', r.id);
       } else db.prepare(`UPDATE crash_bets SET status='loss', mult=0, payout=0 WHERE id=?`).run(b.id);
@@ -283,12 +294,23 @@ function burnStep(ss, cs, nonce, p) { // first step whose roll >= p burns the ch
 }
 const activeChicken = (id) => db.prepare(`SELECT * FROM chicken WHERE tg_id=? AND status='active'`).get(id);
 function endChicken(g, res, mult) {
-  const payout = res === 'win' ? Math.floor(g.amount * mult) : 0;
+  const payout = res === 'win' ? capPay(g.amount * mult) : 0;
   return tx(() => {
     const d = db.prepare(`UPDATE chicken SET status=?, mult=?, payout=? WHERE id=? AND status='active'`).run(res, mult, payout, g.id);
     if (d.changes === 1 && payout) { db.prepare('UPDATE users SET balance=balance+? WHERE tg_id=?').run(payout, g.tg_id); led(g.tg_id, payout, 'chicken_win', g.id); }
     return { mult, payout, balance: getUser(g.tg_id).balance };
   });
+}
+
+const refInfo = (id) => ({
+  link: BOT_USERNAME ? `https://t.me/${BOT_USERNAME}/${APP_NAME}?startapp=ref_${id}` : '', percent: REF_PERCENT,
+  count: db.prepare('SELECT COUNT(*) n FROM referrals WHERE referrer=?').get(id).n,
+  earned: db.prepare(`SELECT COALESCE(SUM(delta),0) s FROM ledger WHERE tg_id=? AND reason='referral'`).get(id).s,
+});
+function startOfDay(now = Date.now()) { // local midnight in the TIMEZONE
+  const f = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(now);
+  const g = (t) => Number(f.find((x) => x.type === t).value);
+  return now - ((g('hour') * 60 + g('minute')) * 60 + g('second')) * 1000 - (now % 1000);
 }
 
 const routes = {
@@ -298,7 +320,7 @@ const routes = {
     const n = getUser(u.tg_id);
     const mg = activeMines(u.tg_id), op = mg ? JSON.parse(mg.opened) : [];
     return {
-      balance: n.balance, history: hist, fair: fair(n),
+      balance: n.balance, history: hist, fair: fair(n), limits: { maxBet: LIM.maxBet, maxPayout: LIM.maxPayout },
       mines: mg ? { n: mg.n, k: mg.k, amount: mg.amount, opened: op, mult: minesMult(mg.n, mg.k, op.length) } : null,
       chicken: cg ? { level: cg.level, amount: cg.amount, step: cg.step, mult: cg.step ? chMult(cg.level, cg.step) : 1 } : null,
     };
@@ -319,7 +341,7 @@ const routes = {
   },
   '/api/crash/bet': (u, b) => {
     const amount = b.amount, auto = b.auto == null ? null : Math.floor(Number(b.auto) * 100) / 100;
-    if (!Number.isSafeInteger(amount) || amount < MIN_BET || amount > MAX_BET) throw new Error('bad_amount');
+    if (!Number.isSafeInteger(amount) || amount < MIN_BET || amount > LIM.maxBet) throw new Error('bad_amount');
     if (auto !== null && !(auto >= 1.01 && auto <= MAX_MULT)) throw new Error('bad_auto');
     const now = Date.now(), r = currentRound(now);
     if (phaseOf(r, now) !== 'bet') throw new Error('late');
@@ -358,7 +380,7 @@ const routes = {
   },
   '/api/mines/start': (u, b) => {
     const { amount, n, k } = b;
-    if (!Number.isSafeInteger(amount) || amount < MIN_BET || amount > MAX_BET) throw new Error('bad_amount');
+    if (!Number.isSafeInteger(amount) || amount < MIN_BET || amount > LIM.maxBet) throw new Error('bad_amount');
     if (!SIZES.includes(n) || !MINES.includes(k) || k >= n * n) throw new Error('bad_game');
     if (activeMines(u.tg_id)) throw new Error('round_active');
     return tx(() => {
@@ -390,7 +412,7 @@ const routes = {
   },
   '/api/chicken/start': (u, b) => {
     const { amount, level } = b;
-    if (!Number.isSafeInteger(amount) || amount < MIN_BET || amount > MAX_BET) throw new Error('bad_amount');
+    if (!Number.isSafeInteger(amount) || amount < MIN_BET || amount > LIM.maxBet) throw new Error('bad_amount');
     if (!(level in CH_LEVELS)) throw new Error('bad_game');
     if (activeChicken(u.tg_id)) throw new Error('round_active');
     return tx(() => {
@@ -456,7 +478,7 @@ const routes = {
     const ch = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) bet, COALESCE(SUM(payout),0) won, COALESCE(MAX(CASE WHEN status='win' THEN mult END),0) best FROM chicken WHERE tg_id=? AND status!='active'`).get(u.tg_id);
     const m = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) bet, COALESCE(SUM(payout),0) won, COALESCE(MAX(CASE WHEN status='win' THEN mult END),0) best FROM mines WHERE tg_id=? AND status!='active'`).get(u.tg_id);
     const w = db.prepare('SELECT id, amount, status, created_at, gift FROM withdrawals WHERE tg_id=? ORDER BY id DESC LIMIT 10').all(u.tg_id).map((r) => ({ ...r, gift_name: giftName(r.gift) }));
-    return { id: x.tg_id, name: x.first_name, username: x.username, since: x.created_at, balance: x.balance, crash: { ...c }, mines: { ...m }, chicken: { ...ch }, withdrawals: w, contact: CONTACT, min_dep: MIN_DEP,
+    return { id: x.tg_id, name: x.first_name, username: x.username, since: x.created_at, balance: x.balance, crash: { ...c }, mines: { ...m }, chicken: { ...ch }, withdrawals: w, contact: CONTACT, min_dep: MIN_DEP, ref: refInfo(u.tg_id),
       deposits: db.prepare('SELECT id, amount, credited, status, created_at FROM deposits WHERE tg_id=? ORDER BY id DESC LIMIT 10').all(u.tg_id).map((r) => ({ ...r })), admin: ADMIN_IDS.has(x.tg_id) };
   },
   '/api/withdraw': (u, b) => { // request only: funds are held until the request is reviewed
@@ -484,6 +506,34 @@ const routes = {
     reviewWithdrawal(b.id, b.status, u.tg_id);
     return { ok: true };
   },
+  '/api/admin/stats': (u, b, t) => { // turnover, payouts and profit for a period
+    assertAdmin(u, t, 'stats');
+    const now = Date.now(), since = { day: startOfDay(now), week: now - 7 * 864e5, month: now - 30 * 864e5, all: 0 }[b.period] ?? 0;
+    const sum = (reasons) => db.prepare(`SELECT COALESCE(SUM(delta),0) s FROM ledger WHERE ts>=? AND reason IN (${reasons.map(() => '?').join(',')})`).get(since, ...reasons).s;
+    const bets = -sum(['crash_bet', 'crash_cancel', 'mines_bet', 'chicken_bet', 'bet']), wins = sum(['crash_win', 'mines_win', 'chicken_win', 'win']);
+    const wd = db.prepare(`SELECT COALESCE(SUM(amount),0) s, COUNT(*) n FROM withdrawals WHERE status='paid' AND gift IS NULL AND updated_at>=?`).get(since);
+    const gw = db.prepare(`SELECT COALESCE(SUM(amount),0) s, COUNT(*) n FROM withdrawals WHERE status='paid' AND gift IS NOT NULL AND updated_at>=?`).get(since);
+    return {
+      period: b.period || 'all', bets, wins, profit: bets - wins, rtp: bets ? Math.round((wins / bets) * 1000) / 10 : 0,
+      players: db.prepare(`SELECT COUNT(DISTINCT tg_id) n FROM ledger WHERE ts>=? AND reason IN ('crash_bet','mines_bet','chicken_bet','bet')`).get(since).n,
+      deposits: sum(['deposit']), withdrawals: wd.s, withdrawals_n: wd.n, gifts_out: gw.s, gifts_out_n: gw.n,
+      gifts_bought: -sum(['gift_buy']), referral: sum(['referral']),
+      balances: { ...db.prepare('SELECT COALESCE(SUM(balance),0) s, COUNT(*) n FROM users').get() },
+      pending: { wd: db.prepare(`SELECT COUNT(*) n FROM withdrawals WHERE status='pending'`).get().n, dep: db.prepare(`SELECT COUNT(*) n FROM deposits WHERE status='pending'`).get().n },
+    };
+  },
+  '/api/admin/limits': (u, b, t) => { // read or change max bet / max payout per round
+    assertAdmin(u, t, 'limits');
+    if (b.maxBet !== undefined || b.maxPayout !== undefined) {
+      const mb = Number(b.maxBet), mp = Number(b.maxPayout);
+      if (!Number.isSafeInteger(mb) || mb < 1 || mb > 1e7 || !Number.isSafeInteger(mp) || mp < 1 || mp > 1e9) throw new Error('bad_amount');
+      LIM.maxBet = mb; LIM.maxPayout = mp;
+      const up = db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
+      up.run('maxBet', String(mb)); up.run('maxPayout', String(mp));
+      audit(u.tg_id, 'limits', null, `maxBet=${mb} maxPayout=${mp}`);
+    }
+    return { maxBet: LIM.maxBet, maxPayout: LIM.maxPayout };
+  },
   '/api/admin/user': (u, b, t) => {
     assertAdmin(u, t, 'user');
     if (!Number.isSafeInteger(b.id)) throw new Error('bad_game');
@@ -507,8 +557,8 @@ const routes = {
     return res;
   },
   '/api/history': (u) => { // balance operations visible to the player (no individual bets)
-    const L = { deposit: 'Пополнение', signup: 'Стартовый баланс', admin_adjust: 'Начисление/списание админом', withdraw_hold: 'Заявка на вывод', withdraw_refund: 'Возврат по заявке', gift_buy: 'Покупка подарка', gift_sell: 'Продажа подарка' };
-    return db.prepare(`SELECT delta, reason, ts FROM ledger WHERE tg_id=? AND reason IN ('signup','deposit','admin_adjust','withdraw_hold','withdraw_refund','gift_buy','gift_sell') ORDER BY id DESC LIMIT 20`)
+    const L = { deposit: 'Пополнение', referral: 'Реферальный бонус', signup: 'Стартовый баланс', admin_adjust: 'Начисление/списание админом', withdraw_hold: 'Заявка на вывод', withdraw_refund: 'Возврат по заявке', gift_buy: 'Покупка подарка', gift_sell: 'Продажа подарка' };
+    return db.prepare(`SELECT delta, reason, ts FROM ledger WHERE tg_id=? AND reason IN ('signup','deposit','referral','admin_adjust','withdraw_hold','withdraw_refund','gift_buy','gift_sell') ORDER BY id DESC LIMIT 20`)
       .all(u.tg_id).map((r) => ({ delta: r.delta, label: L[r.reason], ts: r.ts }));
   },
   '/api/gifts': (u) => ({
@@ -617,17 +667,23 @@ function reviewDeposit(id, status, adminId, amount) { // 'paid' credits the coin
   const r = tx(() => {
     const d = db.prepare(`SELECT * FROM deposits WHERE id=? AND status='pending'`).get(id);
     if (!d) throw new Error('no_game');
-    let credited = 0;
+    let credited = 0, bonus = 0, refTo = null;
     if (status === 'paid') {
       credited = amount == null ? d.amount : amount;
       if (!Number.isSafeInteger(credited) || credited < 1 || credited > 1e9) throw new Error('bad_amount');
       db.prepare('UPDATE users SET balance=balance+? WHERE tg_id=?').run(credited, d.tg_id);
       led(d.tg_id, credited, 'deposit', d.id);
+      const rf = REF_PERCENT ? db.prepare('SELECT referrer FROM referrals WHERE referred=?').get(d.tg_id) : null;
+      if (rf) { // the inviter gets a share of the friend's deposit
+        bonus = Math.floor((credited * REF_PERCENT) / 100);
+        if (bonus > 0) { db.prepare('UPDATE users SET balance=balance+? WHERE tg_id=?').run(bonus, rf.referrer); led(rf.referrer, bonus, 'referral', d.id); refTo = rf.referrer; }
+      }
     }
     db.prepare('UPDATE deposits SET status=?, credited=?, updated_at=? WHERE id=?').run(status, credited, Date.now(), d.id);
     audit(adminId, `deposit_${status}`, d.tg_id, `#${d.id} ${credited || d.amount}`);
-    return { ...d, credited, balance: getUser(d.tg_id).balance };
+    return { ...d, credited, bonus, refTo, balance: getUser(d.tg_id).balance };
   });
+  if (r.bonus > 0) sendSafe(r.refTo, `🎁 Реферальный бонус +${num(r.bonus)} ◆: ваш друг пополнил счёт.`);
   sendSafe(r.tg_id, status === 'paid' ? `💰 Ваш счёт пополнен на ${num(r.credited)} ◆\nБаланс: ${num(r.balance)} ◆` : `❌ Заявка #${r.id} на пополнение отклонена.`);
   return r;
 }
@@ -751,3 +807,4 @@ srv.headersTimeout = 66000;
 process.on('unhandledRejection', (e) => console.error('unhandledRejection:', e?.message ?? e));
 process.on('uncaughtException', (e) => console.error('uncaughtException:', e?.message ?? e));
 pollBot(); // the bot answers /start for everybody, so it always runs
+tgCall('getMe', {}).then((r) => { BOT_USERNAME = r.username || ''; }).catch((e) => console.error('getMe:', e.message)); // needed for referral links
