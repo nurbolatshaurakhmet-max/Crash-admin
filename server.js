@@ -158,6 +158,22 @@ let BOT_USERNAME = '';
 const BET_MS = 5000, END_MS = 3000; // betting window (5 s) and pause after the crash
 const CH_LEVELS = { easy: 0.92, mid: 0.85, hard: 0.75 }, CH_STEPS = 20; // chance to survive one step
 
+/* ---------- Roulette (European, one zero) + Jackpot (shared pot, winner drawn by stake) ---------- */
+db.exec(`CREATE TABLE IF NOT EXISTS roulette(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER NOT NULL REFERENCES users(tg_id), total INTEGER NOT NULL, payout INTEGER NOT NULL,
+  result INTEGER NOT NULL, bets TEXT NOT NULL, nonce INTEGER NOT NULL, ts INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS roulette_user ON roulette(tg_id, id);
+CREATE TABLE IF NOT EXISTS jp_rounds(
+  id INTEGER PRIMARY KEY, seed_enc TEXT NOT NULL, seed_hash TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open',
+  t_draw INTEGER, t_pay INTEGER, t_end INTEGER, ticket REAL, winner INTEGER, pot INTEGER NOT NULL DEFAULT 0,
+  fee INTEGER NOT NULL DEFAULT 0, payout INTEGER);
+CREATE TABLE IF NOT EXISTS jp_bets(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, round_id INTEGER NOT NULL, tg_id INTEGER NOT NULL REFERENCES users(tg_id),
+  amount INTEGER NOT NULL, UNIQUE(round_id, tg_id));`);
+const RO_RED = new Set([1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36]), RO_MAX_BETS = 24;
+const JP_WAIT_MS = Math.max(3000, (Number(process.env.JP_WAIT_SEC) || 20) * 1000), JP_SPIN_MS = 7000, JP_END_MS = 6000; // betting window after the 2nd player joins, wheel spin, pause
+const JP_FEE = Math.min(0.2, Math.max(0, Number(process.env.JP_FEE ?? 0.05))); // house fee taken from the pot (the only house income in Jackpot)
+
 const tx = (fn) => {
   db.exec('BEGIN IMMEDIATE');
   try { const r = fn(); db.exec('COMMIT'); return r; } catch (e) { db.exec('ROLLBACK'); throw e; }
@@ -348,6 +364,54 @@ function startOfDay(now = Date.now()) { // local midnight in the TIMEZONE
   return now - ((g('hour') * 60 + g('minute')) * 60 + g('second')) * 1000 - (now % 1000);
 }
 
+const roKeyOk = (k) => ['red', 'black', 'even', 'odd', 'low', 'high', 'd1', 'd2', 'd3'].includes(k) || /^n([0-9]|[12][0-9]|3[0-6])$/.test(k);
+function roMult(k, n) { // total return multiplier (stake included) when the bet wins, 0 when it loses; zero loses every outside bet
+  if (k[0] === 'n') return Number(k.slice(1)) === n ? 36 : 0;
+  if (n === 0) return 0;
+  switch (k) {
+    case 'red': return RO_RED.has(n) ? 2 : 0; case 'black': return RO_RED.has(n) ? 0 : 2;
+    case 'even': return n % 2 === 0 ? 2 : 0; case 'odd': return n % 2 ? 2 : 0;
+    case 'low': return n <= 18 ? 2 : 0; case 'high': return n >= 19 ? 2 : 0;
+    case 'd1': return n <= 12 ? 3 : 0; case 'd2': return n >= 13 && n <= 24 ? 3 : 0; case 'd3': return n >= 25 ? 3 : 0;
+  }
+  return 0;
+}
+const roRoll = (ss, cs, nonce) => Math.floor((parseInt(crypto.createHmac('sha256', ss).update(`${cs}:${nonce}:r`).digest('hex').slice(0, 13), 16) / 2 ** 52) * 37);
+
+const jpPlayers = (rid) => db.prepare('SELECT b.tg_id, b.amount, u.first_name FROM jp_bets b JOIN users u ON u.tg_id=b.tg_id WHERE b.round_id=? ORDER BY b.id').all(rid);
+const jpGet = (id) => db.prepare('SELECT * FROM jp_rounds WHERE id=?').get(id);
+function jpNew() {
+  const seed = crypto.randomBytes(32).toString('hex');
+  const id = (db.prepare('SELECT MAX(id) m FROM jp_rounds').get().m ?? 0) + 1;
+  db.prepare('INSERT INTO jp_rounds(id,seed_enc,seed_hash) VALUES(?,?,?)').run(id, enc(seed), sha(seed));
+  return id;
+}
+function jpAdvance(now) { // rounds advance lazily, like Crash: whoever asks first moves the clock
+  let r = db.prepare('SELECT * FROM jp_rounds ORDER BY id DESC LIMIT 1').get() || jpGet(jpNew());
+  if (r.status === 'open' && r.t_draw && now >= r.t_draw) { // bets are closed: pick the winner (the payout comes after the animation)
+    tx(() => {
+      const f = db.prepare(`SELECT * FROM jp_rounds WHERE id=? AND status='open'`).get(r.id); if (!f) return;
+      const bets = jpPlayers(f.id), pot = bets.reduce((a, b) => a + b.amount, 0);
+      const ticket = parseInt(crypto.createHmac('sha256', dec(f.seed_enc)).update(`jp:${f.id}`).digest('hex').slice(0, 13), 16) / 2 ** 52;
+      let acc = 0, win = bets[bets.length - 1];
+      for (const b of bets) { acc += b.amount; if (ticket * pot < acc) { win = b; break; } }
+      const fee = Math.floor(pot * JP_FEE);
+      db.prepare(`UPDATE jp_rounds SET status='spin', ticket=?, winner=?, pot=?, fee=?, payout=?, t_pay=?, t_end=? WHERE id=?`)
+        .run(ticket, win.tg_id, pot, fee, pot - fee, f.t_draw + JP_SPIN_MS, f.t_draw + JP_SPIN_MS + JP_END_MS, f.id);
+    });
+    r = jpGet(r.id);
+  }
+  if (r.status === 'spin' && now >= r.t_pay) {
+    tx(() => {
+      const d = db.prepare(`UPDATE jp_rounds SET status='done' WHERE id=? AND status='spin'`).run(r.id);
+      if (d.changes === 1) { db.prepare('UPDATE users SET balance=balance+? WHERE tg_id=?').run(r.payout, r.winner); led(r.winner, r.payout, 'jackpot_win', r.id); }
+    });
+    r = jpGet(r.id);
+  }
+  if (r.status === 'done' && now >= r.t_end) r = jpGet(jpNew());
+  return r;
+}
+
 const routes = {
   '/api/auth': (u) => {
     const hist = db.prepare(`SELECT crash FROM crash_rounds WHERE status='done' ORDER BY id DESC LIMIT 12`).all().map((x) => x.crash);
@@ -474,6 +538,81 @@ const routes = {
     if (g.step < 1) throw new Error('bad_cell');
     return { result: 'win', step: g.step, ...endChicken(g, 'win', chMult(g.level, g.step)) };
   },
+  '/api/roulette/state': (u) => ({
+    last: db.prepare('SELECT result FROM roulette ORDER BY id DESC LIMIT 14').all().map((r) => r.result),
+    fair: fair(getUser(u.tg_id)), balance: getUser(u.tg_id).balance,
+  }),
+  '/api/roulette/spin': (u, b) => { // the result comes from the player's seeds (provably fair); the animation on the client only shows it
+    if (!Array.isArray(b.bets) || !b.bets.length || b.bets.length > RO_MAX_BETS) throw new Error('bad_game');
+    const merged = new Map();
+    for (const it of b.bets) {
+      if (!it || typeof it.k !== 'string' || !roKeyOk(it.k) || !Number.isSafeInteger(it.a) || it.a < MIN_BET) throw new Error('bad_amount');
+      merged.set(it.k, (merged.get(it.k) || 0) + it.a);
+    }
+    const total = [...merged.values()].reduce((a, c) => a + c, 0);
+    if (total > LIM.maxBet) throw new Error('bad_amount');
+    return tx(() => {
+      const x = getUser(u.tg_id);
+      if (x.balance < total) throw new Error('no_balance');
+      const n = roRoll(dec(x.seed_enc), x.client_seed, x.nonce);
+      let ret = 0; for (const [k, a] of merged) ret += a * roMult(k, n);
+      const payout = capPay(ret);
+      db.prepare('UPDATE users SET balance=balance-?+?, nonce=nonce+1 WHERE tg_id=?').run(total, payout, x.tg_id);
+      const id = db.prepare('INSERT INTO roulette(tg_id,total,payout,result,bets,nonce,ts) VALUES(?,?,?,?,?,?,?)')
+        .run(x.tg_id, total, payout, n, JSON.stringify([...merged]), x.nonce, Date.now()).lastInsertRowid;
+      led(x.tg_id, -total, 'roulette_bet', id);
+      if (payout) led(x.tg_id, payout, 'roulette_win', id);
+      const y = getUser(x.tg_id);
+      return { n, total, payout, balance: y.balance, fair: fair(y), nonce: x.nonce };
+    });
+  },
+  '/api/jackpot/state': (u) => {
+    const now = Date.now(), r = jpAdvance(now), pl = jpPlayers(r.id), pot = pl.reduce((a, p) => a + p.amount, 0);
+    const phase = r.status === 'open' ? (r.t_draw ? 'bet' : 'wait') : r.status === 'spin' ? 'spin' : 'end';
+    const me = pl.find((p) => p.tg_id === u.tg_id), shown = phase === 'spin' || phase === 'end'; // winner/ticket are revealed only after the bets are closed
+    const wi = shown ? pl.findIndex((p) => p.tg_id === r.winner) : -1;
+    const nm = (p) => (p.first_name || 'Игрок').slice(0, 16);
+    return {
+      now, id: r.id, phase, hash: r.seed_hash, t_draw: r.t_draw, spin_ms: JP_SPIN_MS, fee: JP_FEE, wait_ms: JP_WAIT_MS, pot,
+      players: pl.map((p) => ({ name: nm(p), amount: p.amount, me: p.tg_id === u.tg_id, chance: pot ? p.amount / pot : 0 })),
+      my: me ? me.amount : 0, ticket: shown ? r.ticket : undefined,
+      winner: wi >= 0 ? { idx: wi, name: nm(pl[wi]), me: pl[wi].tg_id === u.tg_id, payout: r.payout } : null,
+      balance: getUser(u.tg_id).balance,
+      recent: db.prepare(`SELECT j.id, j.pot, j.payout, j.seed_enc, x.first_name FROM jp_rounds j LEFT JOIN users x ON x.tg_id=j.winner WHERE j.status='done' ORDER BY j.id DESC LIMIT 5`).all()
+        .map((j) => ({ id: j.id, pot: j.pot, payout: j.payout, name: (j.first_name || 'Игрок').slice(0, 16), seed: dec(j.seed_enc) })),
+    };
+  },
+  '/api/jackpot/bet': (u, b) => {
+    const amount = b.amount;
+    if (!Number.isSafeInteger(amount) || amount < MIN_BET || amount > LIM.maxBet) throw new Error('bad_amount');
+    const now = Date.now(), r = jpAdvance(now);
+    if (r.status !== 'open' || (r.t_draw && now >= r.t_draw)) throw new Error('late');
+    return tx(() => {
+      const x = getUser(u.tg_id);
+      if (x.balance < amount) throw new Error('no_balance');
+      const cur = db.prepare('SELECT * FROM jp_bets WHERE round_id=? AND tg_id=?').get(r.id, x.tg_id);
+      if ((cur ? cur.amount : 0) + amount > LIM.maxBet) throw new Error('bad_amount'); // the per-round stake is capped by the max bet
+      db.prepare('UPDATE users SET balance=balance-? WHERE tg_id=?').run(amount, x.tg_id);
+      if (cur) db.prepare('UPDATE jp_bets SET amount=amount+? WHERE id=?').run(amount, cur.id);
+      else db.prepare('INSERT INTO jp_bets(round_id,tg_id,amount) VALUES(?,?,?)').run(r.id, x.tg_id, amount);
+      led(x.tg_id, -amount, 'jackpot_bet', r.id);
+      if (!r.t_draw && db.prepare('SELECT COUNT(*) n FROM jp_bets WHERE round_id=?').get(r.id).n >= 2) // the 2nd player starts the countdown
+        db.prepare('UPDATE jp_rounds SET t_draw=? WHERE id=? AND t_draw IS NULL').run(now + JP_WAIT_MS, r.id);
+      return { balance: getUser(x.tg_id).balance };
+    });
+  },
+  '/api/jackpot/cancel': (u) => { // only while nobody else has joined (the countdown has not started)
+    const now = Date.now(), r = jpAdvance(now);
+    if (r.status !== 'open' || r.t_draw) throw new Error('late');
+    return tx(() => {
+      const c = db.prepare('SELECT * FROM jp_bets WHERE round_id=? AND tg_id=?').get(r.id, u.tg_id);
+      if (!c) throw new Error('no_game');
+      db.prepare('DELETE FROM jp_bets WHERE id=?').run(c.id);
+      db.prepare('UPDATE users SET balance=balance+? WHERE tg_id=?').run(c.amount, c.tg_id);
+      led(c.tg_id, c.amount, 'jackpot_cancel', r.id);
+      return { balance: getUser(u.tg_id).balance };
+    });
+  },
   '/api/pay/create': async (u, b) => { // creates a CryptoBot invoice; coins arrive automatically after the payment
     if (!PAY_TOKEN) throw new Error('bad_game');
     const usdt = Math.round(Number(b.usdt) * 100) / 100;
@@ -526,9 +665,11 @@ const routes = {
     const x = getUser(u.tg_id);
     const c = crashAgg(u.tg_id);
     const ch = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) bet, COALESCE(SUM(payout),0) won, COALESCE(MAX(CASE WHEN status='win' THEN mult END),0) best FROM chicken WHERE tg_id=? AND status!='active'`).get(u.tg_id);
+    const ro = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(total),0) bet, COALESCE(SUM(payout),0) won, COALESCE(MAX(CAST(payout AS REAL)/total),0) best FROM roulette WHERE tg_id=?`).get(u.tg_id);
+    const jp = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(b.amount),0) bet, COALESCE(SUM(CASE WHEN r.winner=b.tg_id THEN r.payout END),0) won, COALESCE(MAX(CASE WHEN r.winner=b.tg_id THEN CAST(r.payout AS REAL)/b.amount END),0) best FROM jp_bets b JOIN jp_rounds r ON r.id=b.round_id WHERE b.tg_id=? AND r.status='done'`).get(u.tg_id);
     const m = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) bet, COALESCE(SUM(payout),0) won, COALESCE(MAX(CASE WHEN status='win' THEN mult END),0) best FROM mines WHERE tg_id=? AND status!='active'`).get(u.tg_id);
     const w = db.prepare('SELECT id, amount, status, created_at, gift FROM withdrawals WHERE tg_id=? ORDER BY id DESC LIMIT 10').all(u.tg_id).map((r) => ({ ...r, gift_name: giftName(r.gift) }));
-    return { id: x.tg_id, name: x.first_name, username: x.username, since: x.created_at, balance: x.balance, crash: { ...c }, mines: { ...m }, chicken: { ...ch }, withdrawals: w, contact: CONTACT, min_dep: MIN_DEP, ref: refInfo(u.tg_id), pay: { enabled: !!PAY_TOKEN, min: MIN_USDT, rate: COINS_PER_USDT }, payout: { enabled: !!PAY_TOKEN && CRYPTO_PAYOUTS_ENABLED, minCoins: Math.max(MIN_WD, Math.ceil(MIN_WD_USDT * COINS_PER_USDT)), minUsdt: MIN_WD_USDT }, invoices: myInvoices(u.tg_id),
+    return { id: x.tg_id, name: x.first_name, username: x.username, since: x.created_at, balance: x.balance, crash: { ...c }, mines: { ...m }, chicken: { ...ch }, roulette: { ...ro }, jackpot: { ...jp }, withdrawals: w, contact: CONTACT, min_dep: MIN_DEP, ref: refInfo(u.tg_id), pay: { enabled: !!PAY_TOKEN, min: MIN_USDT, rate: COINS_PER_USDT }, payout: { enabled: !!PAY_TOKEN && CRYPTO_PAYOUTS_ENABLED, minCoins: Math.max(MIN_WD, Math.ceil(MIN_WD_USDT * COINS_PER_USDT)), minUsdt: MIN_WD_USDT }, invoices: myInvoices(u.tg_id),
       deposits: db.prepare('SELECT id, amount, credited, status, created_at FROM deposits WHERE tg_id=? ORDER BY id DESC LIMIT 10').all(u.tg_id).map((r) => ({ ...r })), admin: ADMIN_IDS.has(x.tg_id) };
   },
   '/api/withdraw': async (u, b) => { // automatic Crypto Pay transfer to the user's Telegram ID
@@ -578,12 +719,12 @@ const routes = {
     assertAdmin(u, t, 'stats');
     const now = Date.now(), since = { day: startOfDay(now), week: now - 7 * 864e5, month: now - 30 * 864e5, all: 0 }[b.period] ?? 0;
     const sum = (reasons) => db.prepare(`SELECT COALESCE(SUM(delta),0) s FROM ledger WHERE ts>=? AND reason IN (${reasons.map(() => '?').join(',')})`).get(since, ...reasons).s;
-    const bets = -sum(['crash_bet', 'crash_cancel', 'mines_bet', 'chicken_bet', 'bet']), wins = sum(['crash_win', 'mines_win', 'chicken_win', 'win']);
+    const bets = -sum(['crash_bet', 'crash_cancel', 'mines_bet', 'chicken_bet', 'roulette_bet', 'jackpot_bet', 'jackpot_cancel', 'bet']), wins = sum(['crash_win', 'mines_win', 'chicken_win', 'roulette_win', 'jackpot_win', 'win']);
     const wd = db.prepare(`SELECT COALESCE(SUM(amount),0) s, COUNT(*) n FROM withdrawals WHERE status='paid' AND gift IS NULL AND updated_at>=?`).get(since);
     const gw = db.prepare(`SELECT COALESCE(SUM(amount),0) s, COUNT(*) n FROM withdrawals WHERE status='paid' AND gift IS NOT NULL AND updated_at>=?`).get(since);
     return {
       period: b.period || 'all', bets, wins, profit: bets - wins, rtp: bets ? Math.round((wins / bets) * 1000) / 10 : 0,
-      players: db.prepare(`SELECT COUNT(DISTINCT tg_id) n FROM ledger WHERE ts>=? AND reason IN ('crash_bet','mines_bet','chicken_bet','bet')`).get(since).n,
+      players: db.prepare(`SELECT COUNT(DISTINCT tg_id) n FROM ledger WHERE ts>=? AND reason IN ('crash_bet','mines_bet','chicken_bet','roulette_bet','jackpot_bet','bet')`).get(since).n,
       deposits: sum(['deposit', 'crypto_deposit']), withdrawals: wd.s, withdrawals_n: wd.n, gifts_out: gw.s, gifts_out_n: gw.n,
       gifts_bought: -sum(['gift_buy']), referral: sum(['referral']),
       balances: { ...db.prepare('SELECT COALESCE(SUM(balance),0) s, COUNT(*) n FROM users').get() },
@@ -700,7 +841,9 @@ function stats(id) {
   const h = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) bet FROM chicken WHERE tg_id=? AND status!='active'`).get(id);
   const m = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) bet FROM mines WHERE tg_id=? AND status!='active'`).get(id);
   const g = db.prepare('SELECT COUNT(*) n FROM upgrades WHERE tg_id=?').get(id);
-  return { games: c.n + m.n + g.n + h.n, wagered: c.bet + m.bet + h.bet };
+  const ro = db.prepare('SELECT COUNT(*) n, COALESCE(SUM(total),0) bet FROM roulette WHERE tg_id=?').get(id);
+  const jp = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(b.amount),0) bet FROM jp_bets b JOIN jp_rounds r ON r.id=b.round_id WHERE b.tg_id=? AND r.status='done'`).get(id);
+  return { games: c.n + m.n + g.n + h.n + ro.n + jp.n, wagered: c.bet + m.bet + h.bet + ro.bet + jp.bet };
 }
 const num = (n) => Number(n).toLocaleString('ru-RU');
 const fmtDate = (ms) => new Date(ms).toLocaleString('ru-RU', { timeZone: TZ, day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
@@ -863,8 +1006,8 @@ async function handleTerms(cb) {
 function makeAdminReport(period='day') {
   const now=Date.now(), since={day:startOfDay(now),week:now-7*864e5,month:now-30*864e5,all:0}[period] ?? startOfDay(now);
   const sum=(reasons)=>bankDb.prepare(`SELECT COALESCE(SUM(delta),0) s FROM bank_ledger WHERE ts>=? AND reason IN (${reasons.map(()=>'?').join(',')})`).get(since,...reasons).s;
-  const bets=-sum(['crash_bet','crash_cancel','mines_bet','chicken_bet','bet']);
-  const wins=sum(['crash_win','mines_win','chicken_win','win']);
+  const bets=-sum(['crash_bet','crash_cancel','mines_bet','chicken_bet','roulette_bet','jackpot_bet','jackpot_cancel','bet']);
+  const wins=sum(['crash_win','mines_win','chicken_win','roulette_win','jackpot_win','win']);
   const deposits=sum(['deposit','crypto_deposit']);
   const payouts=bankDb.prepare(`SELECT COALESCE(SUM(amount),0) s,COUNT(*) n FROM withdrawals WHERE status='paid' AND gift IS NULL AND updated_at>=?`).get(since);
   const plus=Math.max(0,bets-wins), minus=Math.max(0,wins-bets), scale=Math.max(1,plus,minus);

@@ -98,6 +98,24 @@ input:disabled{opacity:.45}
 .termsfold{background:var(--panel);border:1px solid #3a2a63;border-radius:14px;padding:10px;margin:10px 0}.termsfold summary{color:var(--cyan);font-weight:700;cursor:pointer;padding:4px}#termstext{white-space:pre-wrap;font-size:14px;line-height:1.45;background:var(--panel);border:1px solid #3a2a63;border-radius:14px;padding:12px;margin:10px 0}
 .tck{display:flex;gap:10px;align-items:flex-start;font-size:14px;margin:12px 0}
 .tck input{width:24px;height:24px;flex:none;margin:0;padding:0;box-shadow:none}
+
+/* roulette + jackpot */
+#rocv,#jpcv{height:300px}
+.rb{display:grid;grid-template-columns:1.25fr repeat(12,1fr);grid-template-rows:repeat(3,38px);gap:3px;margin-bottom:6px}
+.rb2{display:grid;grid-template-columns:repeat(3,1fr);gap:3px;margin-bottom:6px}.rb3{display:grid;grid-template-columns:repeat(6,1fr);gap:3px;margin-bottom:10px}
+.rc{position:relative;padding:0;border:1px solid #4a2f8a;border-radius:7px;color:#fff;font-weight:800;font-size:12px;background:#120a24;min-height:38px}
+.rb3 .rc,.rb2 .rc{font-size:12px;min-height:40px}
+.rc.rr{background:#5c0d22;border-color:#ff3b5c}.rc.rk{background:#0c0618;border-color:#6a5aa8}.rc.rg{background:#0b3d28;border-color:#2dff9a;grid-row:1/4}
+.rc:active:not(:disabled){transform:scale(.92)}.rc:disabled{opacity:.6}
+.rc.win{box-shadow:0 0 14px #ffd34d,inset 0 0 10px #ffd34d88;border-color:#ffd34d;animation:pulse 1s ease-in-out infinite}
+.rc i{position:absolute;right:1px;bottom:1px;min-width:16px;padding:0 3px;border-radius:8px;background:var(--lime);color:#07040f;font-style:normal;font-size:10px;font-weight:900;line-height:15px}
+.rhist{display:flex;gap:6px;overflow-x:auto;margin-bottom:10px;min-height:30px}
+.rn{flex:none;min-width:30px;text-align:center;padding:4px 7px;border-radius:14px;font-size:13px;font-weight:800;border:1px solid}
+.rn.r{color:#ff6b86;border-color:#ff3b5c}.rn.k{color:#cfc6ff;border-color:#6a5aa8}.rn.g{color:#2dff9a;border-color:#2dff9a}
+.jpl{display:flex;align-items:center;gap:8px;padding:8px 2px;border-bottom:1px solid #2b1d4d;font-size:14px}.jpl .dot{width:12px;height:12px;border-radius:50%;flex:none}.jpl .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.jpl.me{color:var(--cyan)}
+.jpl.win{color:#ffd34d;text-shadow:0 0 8px #ffd34d88}
+#jpsub{position:absolute;left:0;right:0;bottom:8px;text-align:center;font-weight:800;color:var(--dim);font-size:15px;pointer-events:none}
+@media (prefers-reduced-motion:reduce){.rc.win{animation:none}}
 </style>
 </head>
 <body>
@@ -113,10 +131,10 @@ input:disabled{opacity:.45}
 </div>
 <div class="app">
   <div class="top">
-    <h1>NEON ARCADE <small style="font-size:11px;color:var(--dim);text-shadow:none">v14</small></h1>
+    <h1>NEON ARCADE <small style="font-size:11px;color:var(--dim);text-shadow:none">v15</small></h1>
     <div style="display:flex;align-items:center"><div class="bal" id="balbtn" style="cursor:pointer"><span id="bal">0</span> ◆ <b style="color:var(--lime)">＋</b></div><button class="mute on" id="mus" aria-label="Музыка">🎵</button><button class="mute" id="mute" aria-label="Звук">🔊</button></div>
   </div>
-  <nav class="tabs"><button id="tab-crash" class="on">🚀 Crash</button><button id="tab-mines">💎 Mines</button><button id="tab-chicken">🐔 Chicken</button><button id="tab-up">🎁 Апгрейд</button><button id="tab-top">🏆 Топ</button><button id="tab-profile">👤 Профиль</button></nav>
+  <nav class="tabs"><button id="tab-crash" class="on">🚀 Crash</button><button id="tab-mines">💎 Mines</button><button id="tab-chicken">🐔 Chicken</button><button id="tab-roulette">🎰 Рулетка</button><button id="tab-jackpot">💰 Джекпот</button><button id="tab-up">🎁 Апгрейд</button><button id="tab-top">🏆 Топ</button><button id="tab-profile">👤 Профиль</button></nav>
   <section id="t-crash">
   <div class="hist" id="hist"></div>
   <div class="stage" id="stage">
@@ -169,6 +187,42 @@ input:disabled{opacity:.45}
     <button class="go" id="chgo">Играть</button>
     <div class="lbl" id="fair3" style="margin:10px 0 0;word-break:break-all"></div>
     <div class="lbl limtxt" style="margin:6px 0 0"></div>
+  </section>
+
+  <section id="t-roulette" hidden>
+    <div class="rhist" id="rohist"></div>
+    <div class="stage"><canvas id="rocv"></canvas></div>
+    <div class="rb" id="roboard"></div>
+    <div class="rb2" id="rodoz"></div>
+    <div class="rb3" id="roout"></div>
+    <div class="panel">
+      <div class="lbl">Номинал фишки</div><div class="row" id="rochips"></div>
+      <div class="row" style="margin-bottom:8px"><button class="mc" id="roundo">↩ Отменить</button><button class="mc" id="roclear">🗑 Очистить</button></div>
+      <div class="info" style="margin-bottom:10px"><div>Ставка на столе<b id="rotot" style="color:var(--lime)">0</b></div><div>Макс. возврат<b id="romax" style="color:var(--cyan)">—</b></div></div>
+      <div class="mmsg" id="romsg"></div>
+      <button class="go" id="rogo">Крутить</button>
+      <div class="lbl" id="fair4" style="margin:10px 0 0;word-break:break-all"></div>
+      <div class="lbl" style="margin:6px 0 0">Европейская рулетка, один «0». Красное/чёрное, чёт/нечёт, 1–18/19–36 — x2, дюжины — x3, число — x36. Ноль забирает все внешние ставки.</div>
+      <div class="lbl limtxt" style="margin:6px 0 0"></div>
+    </div>
+  </section>
+
+  <section id="t-jackpot" hidden>
+    <div class="stage"><canvas id="jpcv"></canvas><div id="jpsub">Загрузка…</div></div>
+    <div class="panel">
+      <div class="info" style="margin-bottom:10px"><div>Банк<b id="jppot" style="color:#ffd34d">0</b></div><div>Твоя ставка<b id="jpmy" style="color:var(--lime)">0</b></div><div>Твой шанс<b id="jpch" style="color:var(--cyan)">—</b></div></div>
+      <div class="lbl">Ставка</div>
+      <input id="jpbet" type="number" inputmode="numeric" min="1" value="100" style="margin-bottom:8px">
+      <div class="row" id="jpquick"></div>
+      <div class="mmsg" id="jpmsg"></div>
+      <button class="go" id="jpgo" disabled>Поставить в банк</button>
+      <button class="mc" id="jpcancel" hidden style="width:100%;margin-top:8px">Отменить ставку</button>
+      <div class="lbl" style="margin:10px 0 0">Все ставки идут в общий банк. Когда зашли двое, запускается таймер, затем колесо выбирает победителя: шанс равен доле твоей ставки. Победитель забирает банк за вычетом комиссии <span id="jpfee">5</span>%.</div>
+      <div class="lbl" id="fair5" style="margin:8px 0 0;word-break:break-all"></div>
+      <div class="lbl limtxt" style="margin:6px 0 0"></div>
+    </div>
+    <div class="panel"><div class="lbl">Участники раунда</div><div id="jplist"></div></div>
+    <div class="panel"><div class="lbl">Прошлые раунды</div><div id="jprecent"></div></div>
   </section>
 
   <section id="t-up" hidden>
@@ -407,7 +461,7 @@ input:disabled{opacity:.45}
     var m=e&&e.message;
     return m==='unauthorized'?((tg&&tg.initData)?'Ошибка входа: проверь BOT_TOKEN на сервере':'Открой игру через Telegram'):m==='terms'?'Нужно принять правила':m==='no_balance'?'Не хватает баланса':m==='round_active'?'Ставка уже есть':m==='late'?'Поздно: ставки закрыты или раунд закончился':m==='slow_down'?'Слишком часто':m==='pay_failed'?'Не удалось создать счёт, попробуй позже':m==='payout_disabled'?'Автоматические выплаты пока не включены администратором':m==='dep_pending'?'Заявка на пополнение уже есть, ждём подтверждения':m==='wd_pending'?'Предыдущая заявка ещё на рассмотрении':m==='bad_amount'?'Неверная сумма или превышен лимит':m==='forbidden'?'Нет доступа (админ-сессия старше часа: закрой и открой приложение)':m==='no_game'?'Не найдено':m==='inv_full'?'Инвентарь полон':'Ошибка связи ('+(m||'?')+')';
   }
-  function showFair(f){if(f){var t='Provably fair · hash '+f.hash.slice(0,16)+'… · nonce '+f.nonce;$('fair2').textContent=t;$('fair3').textContent=t}}
+  function showFair(f){if(f){var t='Provably fair · hash '+f.hash.slice(0,16)+'… · nonce '+f.nonce;$('fair2').textContent=t;$('fair3').textContent=t;$('fair4').textContent=t}}
   var LIM={maxBet:10000,maxPayout:100000};
   function cap(v){return Math.min(v,LIM.maxPayout)}
   function setLim(l){if(!l)return;LIM=l;document.querySelectorAll('.limtxt').forEach(function(e){e.textContent='Макс. ставка '+money(l.maxBet)+' ◆ · макс. выплата за раунд '+money(l.maxPayout)+' ◆'})}
@@ -681,6 +735,245 @@ input:disabled{opacity:.45}
   }
   chSetup();chBuild();
 
+
+  /* ---------- canvas helpers + sounds for roulette/jackpot ---------- */
+  var RM=!!(window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches);
+  function fitCv(cv){var d=window.devicePixelRatio||1,w=cv.clientWidth,h=cv.clientHeight;if(!w||!h)return null;if(cv.width!==Math.round(w*d)||cv.height!==Math.round(h*d)){cv.width=Math.round(w*d);cv.height=Math.round(h*d)}var c=cv.getContext('2d');c.setTransform(d,0,0,d,0,0);return{c:c,w:w,h:h}}
+  function easeOut(p){return 1-Math.pow(1-p,4)}
+  sfx.tick=function(){tone(1500+Math.random()*300,.03,'square',.04)};
+  sfx.chip=function(){tone(780,.05,'triangle',.08);tone(1180,.04,'sine',.05,null,.03)};
+  sfx.jp=function(){[523,659,784,1047,1319].forEach(function(f,i){tone(f,.35,'triangle',.16,null,i*.1)})};
+
+  /* ---------- ROULETTE: the server rolls the number, the wheel animation only shows it ---------- */
+  var RO_ORDER=[0,32,15,19,4,21,2,25,17,34,6,27,13,36,11,30,8,23,10,5,24,16,33,1,20,14,31,9,22,18,29,7,28,12,35,3,26];
+  var RO_REDS={1:1,3:1,5:1,7:1,9:1,12:1,14:1,16:1,18:1,19:1,21:1,23:1,25:1,27:1,30:1,32:1,34:1,36:1};
+  var RO_A=Math.PI*2/37;
+  function roCol(n){return n===0?'g':RO_REDS[n]?'r':'k'}
+  function roMult(k,n){
+    if(k.charAt(0)==='n')return +k.slice(1)===n?36:0;if(n===0)return 0;
+    switch(k){case 'red':return RO_REDS[n]?2:0;case 'black':return RO_REDS[n]?0:2;case 'even':return n%2===0?2:0;case 'odd':return n%2?2:0;
+      case 'low':return n<=18?2:0;case 'high':return n>=19?2:0;case 'd1':return n<=12?3:0;case 'd2':return n>=13&&n<=24?3:0;case 'd3':return n>=25?3:0}
+    return 0;
+  }
+  var ro={bets:{},stack:[],chip:100,busy:false,ang:0,spin:null,resIdx:-1,resN:null,last:[],cells:{},loop:0,lastTs:0,lastTick:-1,lastTickT:0};
+  function roShort(a){return a>=1000?(a/1000).toFixed(a%1000?1:0)+'k':String(a)}
+  function roTotal(){var t=0;for(var k in ro.bets)t+=ro.bets[k];return t}
+  function roMsg(t,c){var e=$('romsg');e.textContent=t||'';e.className='mmsg '+(c||'')}
+  function roRefresh(){
+    for(var k in ro.cells){var c=ro.cells[k],a=ro.bets[k],b=c.querySelector('i');
+      if(a){if(!b){b=document.createElement('i');c.appendChild(b)}b.textContent=roShort(a)}else if(b)c.removeChild(b)}
+    var t=roTotal(),mx=0;for(var q in ro.bets)mx+=ro.bets[q]*({red:2,black:2,even:2,odd:2,low:2,high:2,d1:3,d2:3,d3:3}[q]||36);
+    $('rotot').textContent=money(t);$('romax').textContent=t?money(Math.min(mx,LIM.maxPayout)):'—';
+    $('rogo').disabled=ro.busy||!t||!authed;$('roundo').disabled=ro.busy||!ro.stack.length;$('roclear').disabled=ro.busy||!t;
+    document.querySelectorAll('#roboard .rc,#rodoz .rc,#roout .rc').forEach(function(c){c.disabled=ro.busy});
+  }
+  function roClearWin(){for(var k in ro.cells)ro.cells[k].classList.remove('win')}
+  function roPlace(k){
+    if(ro.busy)return;roClearWin();
+    var t=roTotal();
+    if(t+ro.chip>LIM.maxBet){roMsg('Макс. ставка за спин '+money(LIM.maxBet)+' ◆','l');return}
+    if(t+ro.chip>st.bal){roMsg('Не хватает баланса','l');return}
+    ctx();musicStart();ro.bets[k]=(ro.bets[k]||0)+ro.chip;ro.stack.push({k:k,a:ro.chip});roMsg('');sfx.chip();buzz();roRefresh();
+  }
+  function roCell(parent,k,label,cls){
+    var b=document.createElement('button');b.className='rc'+(cls?' '+cls:'');b.textContent=label;b.onclick=function(){roPlace(k)};parent.appendChild(b);ro.cells[k]=b;return b;
+  }
+  function roBuild(){
+    var bd=$('roboard');bd.innerHTML='';roCell(bd,'n0','0','rg');
+    for(var c=0;c<12;c++)for(var r=0;r<3;r++){var n=3*c+3-r;var b=roCell(bd,'n'+n,String(n),'r'+roCol(n));b.style.gridColumn=String(c+2);b.style.gridRow=String(r+1)}
+    var dz=$('rodoz');dz.innerHTML='';[['d1','1–12'],['d2','13–24'],['d3','25–36']].forEach(function(p){roCell(dz,p[0],p[1]+' · x3')});
+    var ou=$('roout');ou.innerHTML='';[['low','1–18'],['even','Чёт'],['red','🔴'],['black','⚫'],['odd','Нечёт'],['high','19–36']].forEach(function(p){roCell(ou,p[0],p[1])});
+    var ch=$('rochips');ch.innerHTML='';[10,50,100,500,1000].forEach(function(v){
+      var b=document.createElement('button');b.className='mc'+(v===ro.chip?' on':'');b.textContent=v>=1000?'1k':String(v);
+      b.onclick=function(){ro.chip=v;sfx.tap();Array.prototype.forEach.call(ch.children,function(x){x.classList.remove('on')});b.classList.add('on')};ch.appendChild(b)});
+  }
+  function roHist(){
+    var h=$('rohist');h.innerHTML='';
+    ro.last.forEach(function(n){var d=document.createElement('div');d.className='rn '+roCol(n);d.textContent=n;h.appendChild(d)});
+  }
+  /* wheel drawing: pocket 0 is at the top when the wheel angle is 0, angles grow clockwise */
+  function roDraw(wAng,ball,resN){
+    var f=fitCv($('rocv'));if(!f)return;var c=f.c,W=f.w,H=f.h,cx0=W/2,cy0=H/2,R=Math.min(W,H)/2-8;
+    c.clearRect(0,0,W,H);
+    var g=c.createRadialGradient(cx0,cy0,R*.2,cx0,cy0,R*1.1);g.addColorStop(0,'#1d1040');g.addColorStop(1,'#0c0618');c.fillStyle=g;c.fillRect(0,0,W,H);
+    c.save();c.shadowColor='#ff2bd6';c.shadowBlur=18;c.lineWidth=5;c.strokeStyle='#ff2bd6';c.beginPath();c.arc(cx0,cy0,R,0,6.2832);c.stroke();c.restore();
+    var r1=R*.70,r2=R*.97;
+    for(var i=0;i<37;i++){
+      var n=RO_ORDER[i],a0=wAng+i*RO_A-RO_A/2-Math.PI/2,a1=a0+RO_A,col=roCol(n);
+      c.beginPath();c.arc(cx0,cy0,r2,a0,a1);c.arc(cx0,cy0,r1,a1,a0,true);c.closePath();
+      c.fillStyle=col==='r'?'#b3123a':col==='g'?'#0fa05a':'#150b2c';c.fill();c.strokeStyle='#3a2a63';c.lineWidth=1;c.stroke();
+      var am=wAng+i*RO_A-Math.PI/2;c.save();c.translate(cx0+Math.cos(am)*R*.86,cy0+Math.sin(am)*R*.86);c.rotate(am+Math.PI/2);
+      c.fillStyle='#fff';c.font='800 '+Math.max(9,Math.round(R*.075))+'px Trebuchet MS,sans-serif';c.textAlign='center';c.textBaseline='middle';c.fillText(String(n),0,0);c.restore();
+    }
+    c.beginPath();c.arc(cx0,cy0,r1,0,6.2832);c.fillStyle='#0c0618';c.fill();c.lineWidth=2;c.strokeStyle='#19f2ff';c.shadowColor='#19f2ff';c.shadowBlur=10;c.stroke();c.shadowBlur=0;
+    // hub with spokes
+    c.save();c.translate(cx0,cy0);c.rotate(wAng);c.strokeStyle='#3a2a63';c.lineWidth=2;
+    for(var s2=0;s2<4;s2++){c.rotate(Math.PI/2);c.beginPath();c.moveTo(R*.2,0);c.lineTo(r1-4,0);c.stroke()}c.restore();
+    c.beginPath();c.arc(cx0,cy0,R*.3,0,6.2832);var hg=c.createRadialGradient(cx0,cy0,2,cx0,cy0,R*.3);hg.addColorStop(0,'#2a1658');hg.addColorStop(1,'#120a24');c.fillStyle=hg;c.fill();c.strokeStyle='#ff2bd6';c.lineWidth=2;c.stroke();
+    if(resN!==null){var rc=roCol(resN);c.fillStyle=rc==='r'?'#ff6b86':rc==='g'?'#2dff9a':'#e9e4ff';c.shadowColor=c.fillStyle;c.shadowBlur=12;c.font='900 '+Math.round(R*.22)+'px Trebuchet MS,sans-serif';c.textAlign='center';c.textBaseline='middle';c.fillText(String(resN),cx0,cy0+1);c.shadowBlur=0}
+    if(ball){var bx=cx0+Math.cos(ball.a-Math.PI/2)*ball.r*R,by=cy0+Math.sin(ball.a-Math.PI/2)*ball.r*R;
+      c.beginPath();c.arc(bx,by,Math.max(4,R*.034),0,6.2832);c.fillStyle='#fff';c.shadowColor='#fff';c.shadowBlur=12;c.fill();c.shadowBlur=0}
+  }
+  function roFrame(ts){
+    if($('t-roulette').hidden||document.hidden){ro.loop=0;return}
+    var dt=Math.min(50,ts-(ro.lastTs||ts));ro.lastTs=ts;var sp=ro.spin;
+    if(sp){
+      var p=Math.min(1,(ts-sp.t0)/sp.T),e=easeOut(p);
+      var wA=sp.w0+(sp.w1-sp.w0)*e;ro.ang=wA;
+      var bA=sp.b1+sp.rev*(1-e),r=.93;
+      if(p>.6){var q=Math.min(1,(p-.6)/.4);r=.93-(.93-.80)*q*q*(3-2*q)}
+      if(p>.9){var z=(p-.9)/.1;r=.80+Math.abs(Math.sin(z*Math.PI*3))*.04*(1-z)}
+      if(p>=1)r=.80;
+      var ix=Math.floor((((bA-wA)%(Math.PI*2))+Math.PI*2)%(Math.PI*2)/RO_A+.5)%37;
+      if(ix!==ro.lastTick&&p<.97&&ts-ro.lastTickT>45){sfx.tick();ro.lastTickT=ts}ro.lastTick=ix;
+      roDraw(wA,{a:bA,r:r},p>=1?sp.n:null);
+      if(p>=1){ro.spin=null;ro.resIdx=sp.idx;ro.resN=sp.n;roEnd(sp)}
+    }else{
+      ro.ang+=dt*.00022;
+      roDraw(ro.ang,ro.resIdx>=0?{a:ro.ang+ro.resIdx*RO_A,r:.80}:null,ro.resN);
+    }
+    ro.loop=requestAnimationFrame(roFrame);
+  }
+  function roKick(){if(!ro.loop){ro.lastTs=0;ro.loop=requestAnimationFrame(roFrame)}}
+  function roEnd(sp){
+    var r=sp.res;st.bal=r.balance;bal();ro.busy=false;
+    ro.last.unshift(r.n);ro.last=ro.last.slice(0,14);roHist();
+    for(var k in ro.bets)if(roMult(k,r.n)>0&&ro.cells[k])ro.cells[k].classList.add('win');
+    if(ro.cells['n'+r.n])ro.cells['n'+r.n].classList.add('win');
+    var net=r.payout-r.total,cl=roCol(r.n),nm=cl==='g'?'зелёное':cl==='r'?'красное':'чёрное';
+    if(r.payout>r.total){sfx.cash();buzz('good');roMsg('Выпало '+r.n+' ('+nm+') · +'+money(net)+' ◆','w')}
+    else if(r.payout>0){sfx.tap();roMsg('Выпало '+r.n+' ('+nm+') · возврат '+money(r.payout)+' ◆ (−'+money(-net)+')','')}
+    else{sfx.mine();buzz('bad');roMsg('Выпало '+r.n+' ('+nm+') · −'+money(r.total)+' ◆','l')}
+    roRefresh();
+  }
+  function roSpin(){
+    if(ro.busy||!authed)return;var list=[];for(var k in ro.bets)list.push({k:k,a:ro.bets[k]});
+    if(!list.length){roMsg('Поставь фишки на стол','l');return}
+    if(roTotal()>st.bal){roMsg('Не хватает баланса','l');return}
+    ctx();musicStart();ro.busy=true;roClearWin();roMsg('');roRefresh();
+    api('/api/roulette/spin',{bets:list}).then(function(r){
+      showFair(r.fair);var idx=RO_ORDER.indexOf(r.n),T=RM?900:5600,w0=ro.ang;
+      var w1=w0+Math.PI*2*(RM?1:3);var final=w1+idx*RO_A; // the pocket under the ball at the end
+      ro.resIdx=-1;ro.resN=null;ro.lastTick=-1;
+      ro.spin={t0:performance.now(),T:T,w0:w0,w1:w1,b1:final,rev:Math.PI*2*(RM?1:7),n:r.n,idx:idx,res:r};
+      sfx.launch();roKick();
+    }).catch(function(e){ro.busy=false;roMsg(errText(e),'l');roRefresh()});
+  }
+  $('rogo').onclick=roSpin;
+  $('roundo').onclick=function(){if(ro.busy||!ro.stack.length)return;var p=ro.stack.pop();ro.bets[p.k]-=p.a;if(ro.bets[p.k]<=0)delete ro.bets[p.k];roClearWin();sfx.tap();roRefresh()};
+  $('roclear').onclick=function(){if(ro.busy)return;ro.bets={};ro.stack=[];roClearWin();sfx.tap();roRefresh()};
+  function roOpen(){
+    roKick();roRefresh();
+    api('/api/roulette/state').then(function(r){if(!ro.spin){ro.last=r.last;roHist()}st.bal=r.balance;bal();showFair(r.fair)}).catch(function(){});
+  }
+  roBuild();roRefresh();
+
+  /* ---------- JACKPOT: shared pot, the wheel slices are the players' shares ---------- */
+  var JPC=['#19f2ff','#ff2bd6','#7dff6a','#ffd34d','#ff7a3b','#8a7bff','#3bffd0','#ff5c8a'];
+  var jp={snap:null,off:0,busy:false,lastId:0,loop:0,done:null,fx:{}};
+  function jpNow(){return Date.now()+jp.off}
+  function jpMsg(t,c){var e=$('jpmsg');e.textContent=t||'';e.className='mmsg '+(c||'')}
+  function jpRot(r){ // wheel rotation is a pure function of the server clock: reopening mid-spin continues the same animation
+    if(!r||(r.phase!=='spin'&&r.phase!=='end'))return 0;
+    var end=Math.PI*2*6-Math.PI*2*r.ticket,p=r.phase==='end'?1:Math.max(0,Math.min(1,(jpNow()-r.t_draw)/r.spin_ms));
+    return end*(RM?(p>=1?1:0):easeOut(p));
+  }
+  function jpDraw(){
+    var f=fitCv($('jpcv'));if(!f)return;var c=f.c,W=f.w,H=f.h,cx0=W/2,cy0=H/2-8,R=Math.min(W,H)/2-26,r=jp.snap;
+    c.clearRect(0,0,W,H);
+    var rot=jpRot(r),pl=r?r.players:[],pot=r?r.pot:0;
+    c.save();c.shadowColor='#ffd34d';c.shadowBlur=16;c.lineWidth=5;c.strokeStyle='#ffd34d';c.beginPath();c.arc(cx0,cy0,R+3,0,6.2832);c.stroke();c.restore();
+    if(!pl.length||!pot){c.beginPath();c.arc(cx0,cy0,R,0,6.2832);c.fillStyle='#120a24';c.fill();c.setLineDash([6,8]);c.strokeStyle='#3a2a63';c.lineWidth=3;c.stroke();c.setLineDash([])}
+    else{
+      var cum=0;pl.forEach(function(p,i){
+        var fr=p.amount/pot,a0=-Math.PI/2+Math.PI*2*cum+rot,a1=a0+Math.PI*2*fr;cum+=fr;
+        c.beginPath();c.moveTo(cx0,cy0);c.arc(cx0,cy0,R,a0,a1);c.closePath();c.fillStyle=JPC[i%JPC.length];c.globalAlpha=r.winner&&r.winner.idx!==i&&r.phase==='end'?.35:.85;c.fill();c.globalAlpha=1;
+        c.strokeStyle='#07040f';c.lineWidth=2;c.stroke();
+        if(fr>.09){var am=(a0+a1)/2;c.save();c.translate(cx0+Math.cos(am)*R*.66,cy0+Math.sin(am)*R*.66);c.rotate(am);
+          c.fillStyle='#07040f';c.font='800 12px Trebuchet MS,sans-serif';c.textAlign='center';c.textBaseline='middle';c.fillText(p.name.slice(0,9),0,0);c.restore()}
+      });
+    }
+    c.beginPath();c.arc(cx0,cy0,R*.36,0,6.2832);c.fillStyle='#0c0618';c.fill();c.strokeStyle='#ffd34d';c.lineWidth=2;c.stroke();
+    c.fillStyle='#ffd34d';c.shadowColor='#ffd34d';c.shadowBlur=10;c.textAlign='center';c.textBaseline='middle';c.font='900 '+(pot>99999?15:19)+'px Trebuchet MS,sans-serif';c.fillText(money(pot),cx0,cy0-6);
+    c.shadowBlur=0;c.fillStyle='#8a7fb0';c.font='700 11px Trebuchet MS,sans-serif';c.fillText(pot?'◆ в банке':'банк пуст',cx0,cy0+12);
+    c.beginPath();c.moveTo(cx0,cy0-R+16);c.lineTo(cx0-11,cy0-R-10);c.lineTo(cx0+11,cy0-R-10);c.closePath();c.fillStyle='#fff';c.shadowColor='#fff';c.shadowBlur=8;c.fill();c.shadowBlur=0;
+    if(r&&r.phase==='end'&&r.winner){c.fillStyle='#ffd34d';for(var i=0;i<14;i++){var t=performance.now()/700+i,x=cx0+Math.cos(t*1.7+i)*R*.95,y=cy0+Math.sin(t*1.3+i*2)*R*.95;c.globalAlpha=.5+.5*Math.sin(t*3);c.fillRect(x,y,3,3)}c.globalAlpha=1}
+  }
+  function jpSub(){
+    var r=jp.snap,e=$('jpsub');if(!r){e.textContent='Загрузка…';return}
+    if(r.phase==='wait')e.textContent=r.players.length?'Ждём второго игрока…':'Стань первым — сделай ставку';
+    else if(r.phase==='bet')e.textContent='Розыгрыш через '+Math.max(0,Math.ceil((r.t_draw-jpNow())/1000))+' с';
+    else if(r.phase==='spin')e.textContent='Колесо крутится…';
+    else e.textContent=r.winner?'🏆 '+r.winner.name+' забрал '+money(r.winner.payout)+' ◆':'';
+  }
+  function jpRender(){
+    var r=jp.snap;if(!r)return;
+    var my=r.my,pot=r.pot;
+    $('jppot').textContent=money(pot);$('jpmy').textContent=money(my);$('jpch').textContent=my&&pot?(my/pot*100).toFixed(1)+'%':'—';
+    $('jpfee').textContent=Math.round(r.fee*100);
+    $('fair5').textContent='Раунд #'+r.id+' · hash '+r.hash.slice(0,16)+'… · победитель = HMAC(seed, "jp:'+r.id+'") × банк';
+    var open=r.phase==='wait'||r.phase==='bet';
+    var go=$('jpgo');go.disabled=!authed||!open||jp.busy;
+    go.textContent=open?(my?'Добавить к ставке':'Поставить в банк'):r.phase==='spin'?'Идёт розыгрыш…':'Следующий раунд скоро…';
+    $('jpbet').disabled=!open;
+    $('jpcancel').hidden=!(my&&r.phase==='wait');
+    var l=$('jplist');l.innerHTML='';
+    if(!r.players.length){var e=document.createElement('div');e.className='lbl';e.textContent='Пока никого — будь первым';l.appendChild(e)}
+    r.players.forEach(function(p,i){
+      var d=document.createElement('div');d.className='jpl'+(p.me?' me':'')+(r.phase==='end'&&r.winner&&r.winner.idx===i?' win':'');
+      var dot=document.createElement('span');dot.className='dot';dot.style.background=JPC[i%JPC.length];
+      var nm=document.createElement('span');nm.className='nm';nm.textContent=(r.phase==='end'&&r.winner&&r.winner.idx===i?'🏆 ':'')+p.name+(p.me?' (ты)':'');
+      var am=document.createElement('b');am.textContent=money(p.amount)+' ◆ · '+(p.chance*100).toFixed(1)+'%';
+      d.appendChild(dot);d.appendChild(nm);d.appendChild(am);l.appendChild(d);
+    });
+    var h=$('jprecent');h.innerHTML='';
+    if(!r.recent.length){var e2=document.createElement('div');e2.className='lbl';e2.textContent='Раундов пока не было';h.appendChild(e2)}
+    r.recent.forEach(function(x){var d=document.createElement('div');d.className='kv';var a=document.createElement('span');a.textContent='#'+x.id+' · '+x.name;var b=document.createElement('b');b.textContent=money(x.payout)+' ◆';d.appendChild(a);d.appendChild(b);h.appendChild(d)});
+    jpSub();
+  }
+  function jpApply(r,t0,t1){
+    var o=r.now-(t0+t1)/2;jp.off=jp.snap?jp.off*.5+o*.5:o;
+    var prev=jp.snap;jp.snap=r;st.bal=r.balance;bal();
+    if(prev&&prev.id===r.id&&prev.phase!==r.phase){
+      if(r.phase==='spin'){sfx.launch();buzz()}
+      if(r.phase==='end'&&r.winner){if(r.winner.me){sfx.jp();buzz('good');jpMsg('🏆 Ты выиграл '+money(r.winner.payout)+' ◆!','w')}else{sfx.tap();jpMsg('Победил '+r.winner.name+'. В следующий раз повезёт','')}}
+      if(r.phase==='bet'&&prev.phase==='wait')sfx.chip();
+    }
+    if(prev&&prev.id!==r.id){jpMsg('')}
+    jpRender();
+  }
+  function jpPoll(){
+    if(jp.pollBusy)return;jp.pollBusy=true;var t0=Date.now();
+    api('/api/jackpot/state').then(function(r){jpApply(r,t0,Date.now())}).catch(function(e){$('jpsub').textContent=errText(e)}).then(function(){jp.pollBusy=false});
+  }
+  function jpTimer(){ // poll while the tab is visible; faster when something is about to happen
+    if(!$('t-jackpot').hidden&&!document.hidden&&authed)jpPoll();
+    var ph=jp.snap&&jp.snap.phase;setTimeout(jpTimer,ph==='spin'||ph==='bet'?600:1200);
+  }
+  function jpFrame(){
+    if($('t-jackpot').hidden||document.hidden){jp.loop=0;return}
+    jpDraw();if(jp.snap&&jp.snap.phase==='bet')jpSub();
+    jp.loop=requestAnimationFrame(jpFrame);
+  }
+  function jpOpen(){if(!jp.loop)jp.loop=requestAnimationFrame(jpFrame);jpPoll()}
+  $('jpgo').onclick=function(){
+    if(jp.busy||!jp.snap)return;var a=Math.floor(+$('jpbet').value);
+    if(!(a>=1)){jpMsg('Введи ставку от 1','l');return}
+    if(a>st.bal){jpMsg('Не хватает баланса','l');return}
+    ctx();musicStart();jp.busy=true;jpRender();
+    api('/api/jackpot/bet',{amount:a}).then(function(r){st.bal=r.balance;bal();sfx.chip();buzz();jpMsg('Ставка принята','w');jpPoll()})
+      .catch(function(e){jpMsg(errText(e),'l')}).then(function(){jp.busy=false;jpRender()});
+  };
+  $('jpcancel').onclick=function(){
+    if(jp.busy)return;jp.busy=true;
+    api('/api/jackpot/cancel').then(function(r){st.bal=r.balance;bal();sfx.tap();jpMsg('Ставка возвращена','');jpPoll()}).catch(function(e){jpMsg(errText(e),'l')}).then(function(){jp.busy=false;jpRender()});
+  };
+  [['½',function(b){return b/2}],['×2',function(b){return b*2}],['+100',function(b){return b+100}],['Макс',function(){return Math.min(st.bal,LIM.maxBet)}]].forEach(function(p){
+    var b=document.createElement('button');b.className='mc';b.textContent=p[0];
+    b.onclick=function(){sfx.tap();$('jpbet').value=Math.max(1,Math.min(st.bal||1,Math.floor(p[1](+$('jpbet').value||1))))};$('jpquick').appendChild(b);
+  });
+  jpTimer();
+
   /* ---------- bonus, leaderboard, tabs ---------- */
   function loadTop(){
     api('/api/top').then(function(r){
@@ -706,8 +999,8 @@ input:disabled{opacity:.45}
       kv(p,'Имя',r.name||'—');kv(p,'Username',r.username?'@'+r.username:'—');kv(p,'Telegram ID',String(r.id));
       kv(p,'В игре с',fdate(r.since));kv(p,'Баланс',money(r.balance)+' ◆');
       var s=$('pstats');s.innerHTML='';
-      var k=r.chicken||{n:0,bet:0,won:0,best:0},n=r.crash.n+r.mines.n+k.n,bet=r.crash.bet+r.mines.bet+k.bet,won=r.crash.won+r.mines.won+k.won,diff=won-bet;
-      kv(s,'Всего игр',String(n));kv(s,'Crash / Mines / Chicken',r.crash.n+' / '+r.mines.n+' / '+k.n);
+      var k=r.chicken||{n:0,bet:0,won:0,best:0},ro=r.roulette||{n:0,bet:0,won:0,best:0},jp=r.jackpot||{n:0,bet:0,won:0,best:0},n=r.crash.n+r.mines.n+k.n+ro.n+jp.n,bet=r.crash.bet+r.mines.bet+k.bet+ro.bet+jp.bet,won=r.crash.won+r.mines.won+k.won+ro.won+jp.won,diff=won-bet;
+      kv(s,'Всего игр',String(n));kv(s,'Crash / Mines / Chicken',r.crash.n+' / '+r.mines.n+' / '+k.n);kv(s,'Рулетка / Джекпот',ro.n+' / '+jp.n);kv(s,'Джекпотов выиграно',jp.won?money(jp.won)+' ◆':'—');
       kv(s,'Сумма ставок',money(bet)+' ◆');kv(s,'Выиграно',money(won)+' ◆');
       kv(s,'Итог',(diff>=0?'+':'−')+money(Math.abs(diff))+' ◆');
       kv(s,'Лучший икс Crash',r.crash.best?r.crash.best.toFixed(2)+'x':'—');
@@ -958,10 +1251,10 @@ input:disabled{opacity:.45}
       },4400);
     }).catch(function(e){UP.busy=false;upMsg(errText(e),'l');loadUp()});
   };
-  var TABS=['crash','mines','chicken','up','top','profile'];
+  var TABS=['crash','mines','chicken','roulette','jackpot','up','top','profile'];
   function showTab(t){
     TABS.forEach(function(x){$('t-'+x).hidden=x!==t;$('tab-'+x).classList.toggle('on',x===t)});
-    sfx.tap();if(t==='crash')resize();if(t==='top')loadTop();if(t==='profile')loadProfile();if(t==='up')loadUp()
+    sfx.tap();if(t==='crash')resize();if(t==='roulette')roOpen();if(t==='jackpot')jpOpen();if(t==='top')loadTop();if(t==='profile')loadProfile();if(t==='up')loadUp()
   }
   TABS.forEach(function(t){$('tab-'+t).onclick=function(){showTab(t)}});
   mSetup();mBuild();
