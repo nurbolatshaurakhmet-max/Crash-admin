@@ -1009,7 +1009,7 @@ function makeAdminReport(period='day') {
   const bets=-sum(['crash_bet','crash_cancel','mines_bet','chicken_bet','roulette_bet','jackpot_bet','jackpot_cancel','bet']);
   const wins=sum(['crash_win','mines_win','chicken_win','roulette_win','jackpot_win','win']);
   const deposits=sum(['deposit','crypto_deposit']);
-  const payouts=bankDb.prepare(`SELECT COALESCE(SUM(amount),0) s,COUNT(*) n FROM withdrawals WHERE status='paid' AND gift IS NULL AND updated_at>=?`).get(since);
+  const payouts=db.prepare(`SELECT COALESCE(SUM(amount),0) s,COUNT(*) n FROM withdrawals WHERE status='paid' AND gift IS NULL AND updated_at>=?`).get(since);
   const plus=Math.max(0,bets-wins), minus=Math.max(0,wins-bets), scale=Math.max(1,plus,minus);
   const bar=(v)=>'█'.repeat(Math.max(1,Math.round(v/scale*12)));
   const pending=db.prepare(`SELECT COUNT(*) n FROM withdrawals WHERE status IN ('pending','processing','payout_review') AND gift IS NULL`).get().n;
@@ -1028,7 +1028,8 @@ async function handleUpdate(up) { // /start, admin reports and terms callbacks
     const rep=/^\/report(?:@\w+)?(?:\s+(day|week|month|all))?\s*$/i.exec(msg);
     if (rep) {
       if (!ADMIN_IDS.has(up.message.from.id)) return sendSafe(up.message.chat.id, '⛔ Команда доступна только администратору.');
-      return sendSafe(up.message.chat.id, makeAdminReport((rep[1]||'day').toLowerCase()));
+      try { return sendSafe(up.message.chat.id, makeAdminReport((rep[1]||'day').toLowerCase())); }
+      catch (e) { console.error('report:', e.message); return sendSafe(up.message.chat.id, `⚠️ Ошибка отчёта: ${e.message}`); }
     }
   }
   const cb = up.callback_query; if (!cb) return;
